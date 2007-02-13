@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 import sys, os
 
-version = ''
+version = '.02'
 
 setup(name='PoachEggs',
       version=version,
