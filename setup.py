@@ -21,7 +21,7 @@ setup(name='PoachEggs',
       entry_points="""
       # -*- Entry points: -*-
       [console_scripts]
-      poach-eggs = toppbuildit.poach:main
+      poach-eggs = poacheggs:main
       """,
       )
       
