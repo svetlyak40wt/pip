@@ -1,0 +1,11 @@
+setup.cfg
+setup.py
+PoachEggs.egg-info/PKG-INFO
+PoachEggs.egg-info/SOURCES.txt
+PoachEggs.egg-info/dependency_links.txt
+PoachEggs.egg-info/entry_points.txt
+PoachEggs.egg-info/paster_plugins.txt
+PoachEggs.egg-info/requires.txt
+PoachEggs.egg-info/top_level.txt
+PoachEggs.egg-info/zip-safe
+poacheggs/__init__.py
