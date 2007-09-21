@@ -1,5 +1,0 @@
-
-      # -*- Entry points: -*-
-      [console_scripts]
-      poach-eggs = toppbuildit.poach:main
-      
