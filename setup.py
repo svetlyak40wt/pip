@@ -1,25 +1,27 @@
 from setuptools import setup, find_packages
 import sys, os
 
-version = '.02'
+version = '0.3'
 
 setup(name='PoachEggs',
       version=version,
-      description="a script for installing eggs in a workingenv",
+      description="Install a batch of packages at once",
       long_description="""\
 """,
-      classifiers=[], # Get strings from http://www.python.org/pypi?%3Aaction=list_classifiers
+      classifiers=[
+        'Development Status :: 5 - Production/Stable',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: MIT License',
+      ],
       keywords='workingenv setuptools egg',
       author='whit',
       author_email='whit@openplans.org',
       url='http://www.openplans.org',
-      license='',
+      license='MIT',
       packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
       include_package_data=True,
       zip_safe=True,
-      install_requires=[ "workingenv.py" ],
       entry_points="""
-      # -*- Entry points: -*-
       [console_scripts]
       poach-eggs = poacheggs:main
       """,
