@@ -4,6 +4,7 @@ import pkg_resources
 import logging
 import re
 import urlparse
+import urllib2
 import subprocess
 
 my_package = pkg_resources.get_distribution('poacheggs')
@@ -12,7 +13,7 @@ def main(args=None):
     if args is None:
         args = sys.argv[1:]
     options, args = parser.parse_args(args)
-    if not args or len(args) > 1:
+    if not args and not options.requirements:
         print 'You must provide at least one url or file to find install requirements'
         sys.exit(2)
     level = 1 # Notify
