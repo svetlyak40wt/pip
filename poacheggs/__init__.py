@@ -36,7 +36,7 @@ def main(args=None):
     if options.confirm:
         check_requirements(logger, plan)
     elif plan:
-        install_requirements(logger, plan, options.src)
+        install_requirements(logger, plan, options.src, settings['find_links'])
     else:
         logger.notify('Nothing to install')
 
@@ -321,7 +321,7 @@ def check_requirements(logger, plan):
         except ValueError, e:
             logger.warn("Cannot confirm %s" % req)
 
-def install_requirements(logger, plan, src_path):
+def install_requirements(logger, plan, src_path, find_links):
     """
     Install all the requirements found in the list of filenames
     """
@@ -333,9 +333,11 @@ def install_requirements(logger, plan, src_path):
             editable.append(req[1])
         else:
             immediate.append(req)
+    find_link_ops = []
+    for find_link in find_links:
+        find_link_ops.extend(['-f', find_link])
     if immediate:
-        args = ', '.join([
-            '"%s"' % req.replace('"', '').replace("'", '') for req in immediate])
+        args = _quote_args(find_link_ops + immediate)
         logger.start_progress('Installing %s\nInstalling ...' % ', '.join(immediate))
         logger.indent += 2
         call_subprocess(
@@ -366,11 +368,12 @@ def install_requirements(logger, plan, src_path):
             else:
                 logger.start_progress('Installing editable %s to %s...' % (req, dir))
                 logger.indent += 2
+                args = _quote_args(find_link_ops + [req])
                 cmd = [sys.executable, '-c',
                        "import setuptools.command.easy_install; "
                        "setuptools.command.easy_install.main("
-                       "[\"-q\", \"-b\", \".\", \"-e\", \"%s\"])"
-                       % req]
+                       "[\"-q\", \"-b\", \".\", \"-e\", %s])"
+                       % args]
                 call_subprocess(
                     cmd, logger,
                     show_stdout=False, filter_stdout=make_filter_easy_install())
@@ -386,7 +389,10 @@ def install_requirements(logger, plan, src_path):
                 logger.end_progress()
     finally:
         os.chdir(prev_path)
-        
+
+def _quote_args(args):
+    return ', '.join([
+        '"%s"' % arg.replace('"', '').replace("'", '') for arg in args])
 
 def get_lines(fn_or_url):
     scheme = urlparse.urlparse(fn_or_url)[0]
@@ -431,6 +437,7 @@ def call_subprocess(cmd, logger, show_stdout=True,
         logger.fatal(
             "Error %s while executing command %s" % (e, cmd_desc))
         raise
+    all_output = []
     if stdout is not None:
         stdout = proc.stdout
         while 1:
@@ -438,6 +445,7 @@ def call_subprocess(cmd, logger, show_stdout=True,
             if not line:
                 break
             line = line.rstrip()
+            all_output.append(line)
             if filter_stdout:
                 level = filter_stdout(line)
                 if isinstance(level, tuple):
@@ -452,6 +460,9 @@ def call_subprocess(cmd, logger, show_stdout=True,
     proc.wait()
     if proc.returncode:
         if raise_on_returncode:
+            if all_output:
+                logger.notify('Complete output from command %s:' % cmd_desc)
+                logger.notify('\n'.join(all_output) + '\n----------------------------------------')
             raise OSError(
                 "Command %s failed with error code %s"
                 % (cmd_desc, proc.returncode))
