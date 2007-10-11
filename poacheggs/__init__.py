@@ -36,7 +36,19 @@ def main(args=None):
     if options.confirm:
         check_requirements(logger, plan)
     elif plan:
-        install_requirements(logger, plan, options.src, settings['find_links'])
+        
+        if options.src:
+            src = options.src
+        else:     # determine src directory
+            for i in 'VIRTUAL_ENV', 'WORKING_ENV':
+                if os.environ.has_key(i):
+                    directory = os.environ[i]
+                    break
+            else:
+                directory = '.'
+            src = os.path.join(directory, 'src')            
+
+        install_requirements(logger, plan, src, settings['find_links'])
     else:
         logger.notify('Nothing to install')
 
@@ -103,8 +115,7 @@ parser.add_option('--src',
                   action='store',
                   metavar="SRC_DIR",
                   dest='src',
-                  default='./src/',
-                  help="Directory to install source/editable packages into (default ./src/)")
+                  help="Directory to install source/editable packages into (default $VIRTUAL_ENV | $WORKING_ENV | ./src/)")
 
 ############################################################
 ## Infrastructure
