@@ -1,0 +1,13 @@
+Poach Eggs
+==========
+
+This script installs a set of packages at once using
+``easy_install``.  It improves on the output of easy_install and also
+allows you to define a set of working packages, separately from the
+exact requirements of the packages themselves.
+
+This replicates the ``--requirements`` functionality of `workingenv
+<http://cheeseshop.python.org/pypi/workingenv.py>`_, but you don't
+have to use workingenv to use this; in particular it works well with
+`virtualenv <http://pypi.python.org/pypi/virtualenv>`_.
+
