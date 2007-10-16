@@ -11,3 +11,13 @@ This replicates the ``--requirements`` functionality of `workingenv
 have to use workingenv to use this; in particular it works well with
 `virtualenv <http://pypi.python.org/pypi/virtualenv>`_.
 
+News
+~~~~
+
+svn trunk
+---------
+
+* Added ``--distutils-cfg`` option.
+
+* Warn about globally-installed eggs when in a workingenv or
+  virtualenv.

@@ -30,6 +30,7 @@ def main(args=None):
         main_distutils_cfg(options.distutils_cfg)
         return
 
+    warn_global_eggs()
     settings = dict(find_links=options.find_links, always_unzip=False)
 
     requirement_lines = read_requirements(logger, options.requirements)
@@ -132,6 +133,26 @@ parser.add_option('--distutils-cfg',
                   help='Update a setting in distutils.cfg, for example, --distutils-cfg=easy_install:index_url:http://download.zope.org/ppix/; '
                   'this option is exclusive of all other options.')
 
+def warn_global_eggs():
+    if hasattr(sys, 'real_prefix'):
+        # virtualenv
+        ## FIXME: this isn't right on Windows
+        check_prefix = os.path.join(sys.real_prefix, 'lib', 'python'+sys.version[:3])
+    elif os.environ.get('WORKING_ENV'):
+        # workingenv
+        check_prefix = os.path.join(sys.prefix, 'lib', 'python'+sys.version[:3])
+    else:
+        # normal global environ, no need to warn
+        return
+    for path in sys.path:
+        if not path.endswith('.egg'):
+            continue
+        if os.path.basename(path).startswith('setuptools'):
+            # This is okay.
+            continue
+        if path.startswith(check_prefix):
+            logger.notify(
+                "global eggs may cause problems: %s" % path)
 
 def main_distutils_cfg(new_options):
     new_settings = []
