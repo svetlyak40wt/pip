@@ -10,10 +10,15 @@ import subprocess
 my_package = pkg_resources.get_distribution('poacheggs')
 
 def main(args=None):
+    global logger
     if args is None:
         args = sys.argv[1:]
     options, args = parser.parse_args(args)
-    if not args and not options.requirements:
+    if options.distutils_cfg:
+        if args or options.requirements or options.editable:
+            print 'If you use --distutils-cfg you cannot install any packages'
+            sys.exit(2)
+    elif not args and not options.requirements and not options.editable:
         print 'You must provide at least one url or file to find install requirements'
         sys.exit(2)
     level = 1 # Notify
@@ -21,6 +26,9 @@ def main(args=None):
     level -= options.quiet
     level = Logger.level_for_integer(3-level)
     logger = Logger([(level, sys.stdout)])
+    if options.distutils_cfg:
+        main_distutils_cfg(options.distutils_cfg)
+        return
 
     settings = dict(find_links=options.find_links, always_unzip=False)
 
@@ -116,6 +124,102 @@ parser.add_option('--src',
                   metavar="SRC_DIR",
                   dest='src',
                   help="Directory to install source/editable packages into (default $VIRTUAL_ENV | $WORKING_ENV | ./src/)")
+
+parser.add_option('--distutils-cfg',
+                  action='append',
+                  metavar='SECTION:OPTION:VALUE',
+                  dest='distutils_cfg',
+                  help='Update a setting in distutils.cfg, for example, --distutils-cfg=easy_install:index_url:http://download.zope.org/ppix/; '
+                  'this option is exclusive of all other options.')
+
+
+def main_distutils_cfg(new_options):
+    new_settings = []
+    for new_option in new_options:
+        try:
+            section, name, value = new_option.split(':', 2)
+            if name.startswith('+'):
+                append = True
+                name = name[1:]
+            else:
+                append = False
+        except ValueError:
+            print 'Bad option: --distutils-cfg=%s' % new_option
+            sys.exit(2)
+        new_settings.append((section, name, value, append))
+    distutils_file = find_distutils_file()
+    for section, name, value, append in new_settings:
+        update_distutils_file(distutils_file, section, name, value, append)
+    logger.info('Updated %s' % distutils_file)
+
+def find_distutils_file():
+    import distutils.dist
+    dist = distutils.dist.Distribution(None)
+    files = dist.find_config_files()
+    writable_files = []
+    for file in files:
+        if not os.path.exists(file):
+            logger.info('Distutils config file %s does not exist' % file)
+            continue
+        if os.access(file, os.W_OK):
+            logger.debug('Distutils config %s is writable' % file)
+            writable_files.append(file)
+        else:
+            logger.notify('Distutils config %s is not writable' % file)
+    if not files:
+        logger.fatal(
+            'Could not find any existing writable config file (tried options %s)'
+            % ', '.join(files))
+        raise OSError("No config files found")
+    if len(files) > 1:
+        logger.notify(
+            "Choosing file %s among writable options %s"
+            % (files[0], ', '.join(files[1:])))
+    return files[0]
+
+def update_distutils_file(filename, section, name, value, append):
+    f = open(filename, 'r')
+    lines = f.readlines()
+    f.close()
+    section_index = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith('[%s]' % section):
+            section_index = index
+            break
+    if section_index is None:
+        logger.info('Adding section [%s]' % section)
+        lines.append('[%s]\n' % section)
+        lines.append('%s = %s\n' % (name, value))
+    else:
+        start_item_index = None
+        item_index = None
+        name_regex = re.compile(r'^%s\s*[=:]' % re.escape(name))
+        whitespace_regex = re.compile(r'^\s+')
+        for index_offset, line in enumerate(lines[section_index+1:]):
+            index = index_offset + section_index + 1
+            if item_index is not None:
+                if whitespace_regex.match(line):
+                    # continuation; point to last line
+                    item_index = index
+                else:
+                    break
+            if name_regex.match(line):
+                start_item_index = item_index = index
+            if line.startswith('['):
+                # new section
+                break
+        if item_index is None:
+            logger.info('Added %s to section [%s]' % (name, section))
+            lines.insert(section_index+1,
+                         '%s = %s\n' % (name, value))
+        elif append:
+            logger.info('Appended value %s to setting %s' % (value, name))
+            lines.insert(item_index+1,
+                         '    %s\n' % value)
+        else:
+            logger.info('Replaced setting %s' % name)
+            lines[start_item_index:item_index+1] = ['%s = %s\n' % (name, value)]
+        
 
 ############################################################
 ## Infrastructure
