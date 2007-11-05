@@ -517,7 +517,7 @@ def install_requirements(logger, plan, src_path, find_links):
             os.chdir(dir)
             call_subprocess(
                 [sys.executable, '-c',
-                 "import setuptools; execfile(\"setup.py\")",
+                 "import setuptools, os; __file__=os.path.abspath(\"setup.py\"); execfile(\"setup.py\")",
                  "develop"], logger,
                 show_stdout=False, filter_stdout=make_filter_develop())
             if not dir_exists:
