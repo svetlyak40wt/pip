@@ -9,29 +9,62 @@ import subprocess
 
 my_package = pkg_resources.get_distribution('poacheggs')
 
-def main(args=None):
+class BadCommand(Exception):
+    """
+    Raised when the command is improperly invoked
+    """
+
+    def catcher(cls, func):
+        def replacement(args=None):
+            if args is None:
+                args = sys.argv[1:]
+            try:
+                return func(args)
+            except cls, e:
+                print str(e)
+                sys.exit(2)
+        return replacement
+    catcher = classmethod(catcher)
+
+@BadCommand.catcher
+def main(args):
     global logger
-    if args is None:
-        args = sys.argv[1:]
     options, args = parser.parse_args(args)
     if options.distutils_cfg:
         if args or options.requirements or options.editable:
-            print 'If you use --distutils-cfg you cannot install any packages'
-            sys.exit(2)
+            raise BadCommand('If you use --distutils-cfg you cannot install any packages')
+    elif options.freeze_filename:
+        if args or options.requirements or options.editable:
+            raise BadCommand('If you use --freeze you cannot install any packages')
     elif not args and not options.requirements and not options.editable:
-        print 'You must provide at least one url or file to find install requirements'
-        sys.exit(2)
+        raise BadCommand('You must provide at least one url or file to find install requirements')
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
     level = Logger.level_for_integer(3-level)
     logger = Logger([(level, sys.stdout)])
+    if not options.src:
+        for i in 'VIRTUAL_ENV', 'WORKING_ENV':
+            if os.environ.has_key(i):
+                directory = os.environ[i]
+                break
+        else:
+            directory = '.'
+        options.src = os.path.join(directory, 'src')
+    options.src = os.path.expanduser(options.src)
     if options.distutils_cfg:
         main_distutils_cfg(options.distutils_cfg)
         return
 
+    if options.freeze_filename:
+        main_freeze(options.freeze_filename, options.src, options.freeze_find_tags)
+        warn_global_eggs()
+        return
+
     warn_global_eggs()
-    settings = dict(find_links=options.find_links, always_unzip=False)
+
+    settings = dict(find_links=options.find_links, always_unzip=False,
+                    egg_cache=options.egg_cache)
 
     requirement_lines = read_requirements(logger, options.requirements)
     requirement_lines[:0] = [(a, '.') for a in args]
@@ -43,21 +76,24 @@ def main(args=None):
 
     plan = parse_requirements(logger, requirement_lines, settings)
     if options.confirm:
-        check_requirements(logger, plan)
+        check_requirements(logger, plan,
+                           settings, cache_only=options.cache_only)
+    elif options.collect:
+        if options.cache_only:
+            raise BadCommand('--collect and --cache-only do not make sense to use together')
+        if not options.egg_cache:
+            raise BadCommand('If using --collect you must provide --egg-cache')
+        if not os.path.exists(options.egg_cache):
+            logger.notify('Creating egg cache directory %s' % options.egg_cache)
+            os.makedirs(options.egg_cache)
+        install_requirements(logger, plan, src_path=None, find_links=settings['find_links'],
+                             cache_only=False, fetch_only=True,
+                             egg_cache=options.egg_cache)
     elif plan:
-        
-        if options.src:
-            src = options.src
-        else:     # determine src directory
-            for i in 'VIRTUAL_ENV', 'WORKING_ENV':
-                if os.environ.has_key(i):
-                    directory = os.environ[i]
-                    break
-            else:
-                directory = '.'
-            src = os.path.join(directory, 'src')            
-
-        install_requirements(logger, plan, src, settings['find_links'])
+        if options.egg_cache:
+            settings['find_links'].append(make_file_url(options.egg_cache))
+        install_requirements(logger, plan, options.src, settings['find_links'],
+                             cache_only=options.cache_only)
     else:
         logger.notify('Nothing to install')
 
@@ -71,7 +107,11 @@ A requirement with -e will install the requirement as 'editable'
 In a list of requirements: one requirement per line, optionally with
 -e for editable packages).  This file can also contain lines starting
 with -Z, -f, and -r; -Z to always unzip, -f to add to --find-links, -r
-to reference another requirements file."""
+to reference another requirements file.
+
+If you use --freeze then the requirements file will be overwritten
+with the exact packages currently installed.
+"""
 
 parser = OptionParser(version=str(my_package),
                       usage="%%prog [OPTIONS] [REQUIREMENT...]\n\n%s" % help)
@@ -132,6 +172,38 @@ parser.add_option('--distutils-cfg',
                   dest='distutils_cfg',
                   help='Update a setting in distutils.cfg, for example, --distutils-cfg=easy_install:index_url:http://download.zope.org/ppix/; '
                   'this option is exclusive of all other options.')
+
+parser.add_option('--egg-cache',
+                  dest='egg_cache',
+                  metavar='DIR',
+                  help='A directory where a cache of eggs is found (or if you use --collect, where they should be placed)')
+
+parser.add_option('--collect',
+                  dest='collect',
+                  action='store_true',
+                  help='Collect the eggs for this installation, but do not install them')
+
+parser.add_option('--cache-only',
+                  dest='cache_only',
+                  action='store_true',
+                  help='Get eggs from the cache only (do not look on the network)')
+
+parser.add_option('--find-src',
+                  dest='find_src',
+                  metavar='DIR',
+                  action='append',
+                  default=(),
+                  help='A directory where source checkouts can be found')
+
+parser.add_option('--freeze',
+                  dest='freeze_filename',
+                  metavar='FILENAME',
+                  help='Freeze the currently-installed packages into a new requirements file FILENAME (use - for stdout)')
+
+parser.add_option('--freeze-find-tags',
+                  dest='freeze_find_tags',
+                  action='store_true',
+                  help='If freezing a trunk, see if there\'s a workable tag (can be slow)')
 
 def warn_global_eggs():
     if hasattr(sys, 'real_prefix'):
@@ -240,7 +312,210 @@ def update_distutils_file(filename, section, name, value, append):
         else:
             logger.info('Replaced setting %s' % name)
             lines[start_item_index:item_index+1] = ['%s = %s\n' % (name, value)]
-        
+    f = open(filename, 'w')
+    f.writelines(lines)
+    f.close()
+
+############################################################
+## Freezing
+
+rev_re = re.compile(r'-r(\d+)$')
+
+def main_freeze(freeze_filename, src, find_tags):
+    if freeze_filename == '-':
+        logger.move_stdout_to_stderr()
+    settings = dict(find_links=[], always_unzip=False,
+                    egg_cache=None)
+    dependency_links = []
+    if os.path.exists(freeze_filename):
+        logger.notify('Reading settings from %s' % freeze_filename)
+        lines = read_requirements(logger, [freeze_filename])
+        plan = parse_requirements(logger, lines, settings)
+        for item in plan:
+            if isinstance(item, tuple):
+                assert item[0] == '--editable'
+                continue
+            if item.startswith('http:') or item.startswith('https:'):
+                dependency_links.append(item)
+    if freeze_filename == '-':
+        f = sys.stdout
+    else:
+        f = open(freeze_filename, 'w')
+    src = os.path.normcase(os.path.abspath(src))
+    if not os.path.exists(src):
+        logger.warn('src directory %s does not exist' % src)
+    for dist in pkg_resources.working_set:
+        if dist.has_metadata('dependency_links.txt'):
+            dependency_links.extend(dist.get_metadata_lines('dependency_links.txt'))
+    for link in settings['find_links']:
+        if '#egg' in link:
+            dependency_links.append(link)
+    for link in settings['find_links']:
+        print >> f, '-f %s' % link
+    if settings['always_unzip']:
+        print >> f, '--always-unzip'
+    for dist in pkg_resources.working_set:
+        if dist.key == 'setuptools' or dist.key == 'poacheggs':
+            ## FIXME: also skip virtualenv?
+            continue
+        location = os.path.normcase(os.path.abspath(dist.location))
+        if os.path.exists(os.path.join(location, '.svn')):
+            if not location.startswith(src):
+                logger.warn('Warning: svn checkout not in src (%s): %s' % (src, location))
+            req = get_src_requirement(dist, location, find_tags)
+        else:
+            req = dist.as_requirement()
+            specs = req.specs
+            assert len(specs) == 1 and specs[0][0] == '=='
+            version = specs[0][1]
+            match = rev_re.search(version)
+            if match:
+                svn_location = get_svn_location(dist, dependency_links)
+                if not svn_location:
+                    logger.warn(
+                        'Warning: cannot find svn location for %s' % req)
+                    print >> f, '# could not find svn URL in depedency_links for any package'
+                else:
+                    print >> f, '# to satisfy requirement %s' % req
+                    req = '--editable %s@%s' % (svn_location, match.group(1))
+        print >> f, req
+    if freeze_filename != '-':
+        logger.notify('Put requirements in %s' % freeze_filename)
+        f.close()
+
+egg_fragment_re = re.compile(r'#egg=(.*)$')
+
+def get_svn_location(dist, dependency_links):
+    keys = []
+    for link in dependency_links:
+        match = egg_fragment_re.search(link)
+        if not match:
+            continue
+        name = match.group(1)
+        if '-' in name:
+            key = '-'.join(name.split('-')[:-1]).lower()
+        else:
+            key = name
+        if key == dist.key:
+            return link.split('#', 1)[0]
+        keys.append(key)
+    return None
+
+def get_src_requirement(dist, location, find_tags):
+    if not os.path.exists(os.path.join(location, '.svn')):
+        logger.warn('cannot determine version of editable source in %s (is not svn checkout)' % location)
+        return dist.as_requirement()
+    repo = get_svn_url(location)
+    parts = repo.split('/')
+    if parts[-2] in ('tags', 'tag'):
+        # It's a tag, perfect!
+        return '-e %s#egg=%s-%s' % (repo, dist.project_name, parts[-1])
+    elif parts[-2] in ('branches', 'branch'):
+        # It's a branch :(
+        rev = get_svn_revision(location)
+        return '-e %s@%s#egg=%s-%s%s-r%s' % (repo, rev, dist.project_name, dist.version, parts[-1], rev)
+    elif parts[-1] == 'trunk':
+        # Trunk :-/
+        rev = get_svn_revision(location)
+        if find_tags:
+            tag_url = '/'.join(parts[:-1]) + '/tags'
+            tag_revs = get_tag_revs(tag_url)
+            match = find_tag_match(rev, tag_revs)
+            if match:
+                logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
+                return '-e %s/%s#egg=%s-%s' % (tag_url, match, dist.project_name, match)
+        return '-e %s@%s#egg=%s-dev' % (repo, rev, dist.project_name)
+    else:
+        # Don't know what it is
+        logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
+        rev = get_svn_revision(location)
+        return '-e %s@%s#egg=%s-dev' % (repo, rev, dist.project_name)
+
+_svn_url_re = re.compile('url="([^"]+)"')
+_svn_rev_re = re.compile('committed-rev="(\d+)"')
+
+def get_svn_revision(location):
+    """
+    Return the maximum revision for all files under a given location
+    """
+    # Note: taken from setuptools.command.egg_info
+    revision = 0
+
+    for base, dirs, files in os.walk(location):
+        if '.svn' not in dirs:
+            dirs[:] = []
+            continue    # no sense walking uncontrolled subdirs
+        dirs.remove('.svn')
+        f = open(os.path.join(base, '.svn', 'entries'))
+        data = f.read()
+        f.close()
+
+        if data.startswith('8'):
+            data = map(str.splitlines,data.split('\n\x0c\n'))
+            del data[0][0]  # get rid of the '8'
+            dirurl = data[0][3]
+            revs = [int(d[9]) for d in data if len(d)>9 and d[9]]+[0]
+            if revs:
+                localrev = max(revs)
+            else:
+                localrev = 0
+        elif data.startswith('<?xml'):
+            dirurl = _svn_url_re.search(data).group(1)    # get repository URL
+            revs = [int(m.group(1)) for m in _svn_rev_re.finditer(data)]+[0]
+            if revs:
+                localrev = max(revs)
+            else:
+                localrev = 0
+        else:
+            logger.warn("unrecognized .svn/entries format; skipping %s", base)
+            dirs[:] = []
+            continue
+        if base == location:
+            base_url = dirurl+'/'   # save the root url
+        elif not dirurl.startswith(base_url):
+            dirs[:] = []
+            continue    # not part of the same svn tree, skip it
+        revision = max(revision, localrev)
+
+    return revision
+
+def get_svn_url(location):
+    f = open(os.path.join(location, '.svn', 'entries'))
+    data = f.read()
+    f.close()
+    if data.startswith('8'):
+        data = map(str.splitlines,data.split('\n\x0c\n'))
+        del data[0][0]  # get rid of the '8'
+        return data[0][3]
+    elif data.startswith('<?xml'):
+        return _svn_url_re.search(data).group(1)    # get repository URL
+    else:
+        logger.warn("unrecognized .svn/entries format in %s" % location)
+        # Or raise exception?
+        return None
+
+def get_tag_revs(svn_tag_url):
+    stdout = call_subprocess(
+        ['svn', 'ls', '-v', svn_tag_url], logger, show_stdout=False)
+    results = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        rev = int(parts[0])
+        tag = parts[-1].strip('/')
+        results.append((tag, rev))
+    return results
+
+def find_tag_match(rev, tag_revs):
+    best_match_rev = None
+    best_tag = None
+    for tag, tag_rev in tag_revs:
+        if (tag_rev > rev and
+            (best_match_rev is None or best_match_rev > tag_rev)):
+            # FIXME: Is best_match > tag_rev really possible?
+            # or is it a sign something is wacky?
+            best_match_rev = tag_rev
+            best_tag = tag
+    return best_tag
 
 ############################################################
 ## Infrastructure
@@ -386,6 +661,20 @@ class Logger(object):
 
     level_for_integer = classmethod(level_for_integer)
 
+    def move_stdout_to_stderr(self):
+        to_remove = []
+        to_add = []
+        for consumer_level, consumer in self.consumers:
+            if consumer == sys.stdout:
+                to_remove.append((consumer_level, consumer))
+                to_add.append((consumer_level, sys.stderr))
+        for item in to_remove:
+            self.consumers.remove(item)
+        self.consumers.extend(to_add)
+
+############################################################
+## Requirement file parsing stuff
+
 def read_requirements(logger, requirements):
     """
     Read all the lines from the requirement files, including recursive
@@ -413,7 +702,7 @@ def parse_requirements(logger, requirement_lines, settings):
     Parse all the lines of requirements.  Can override options.
     Returns a list of requirements to be installed.
     """
-    options_re = re.compile(r'^--?([a-zA-Z0-9_-]*)\s+')
+    options_re = re.compile(r'^--?([a-zA-Z0-9_-]+)\s*')
     plan = []
     for line, uri in requirement_lines:
         match = options_re.search(line)
@@ -439,7 +728,6 @@ def check_requirements(logger, plan):
     """
     Check all the requirements found in the list of filenames
     """
-    import pkg_resources
     for req in plan:
         if isinstance(req, tuple) and req[0] == '--editable':
             req = req[1]
@@ -456,12 +744,13 @@ def check_requirements(logger, plan):
             logger.warn("  %s" % e)
         except ValueError, e:
             logger.warn("Cannot confirm %s" % req)
-
-def install_requirements(logger, plan, src_path, find_links):
+        
+def install_requirements(logger, plan, src_path, find_links,
+                         cache_only=False, fetch_only=False,
+                         egg_cache=None):
     """
     Install all the requirements found in the list of filenames
     """
-    import pkg_resources
     immediate = []
     editable = []
     for req in plan:
@@ -469,12 +758,23 @@ def install_requirements(logger, plan, src_path, find_links):
             editable.append(req[1])
         else:
             immediate.append(req)
-    find_link_ops = []
+    easy_ops = []
     for find_link in find_links:
-        find_link_ops.extend(['-f', find_link])
+        easy_ops.extend(['-f', find_link])
+    if cache_only:
+        # This kind of implicitly disables fetching over the network
+        easy_ops.extend(['--allow-hosts', '^(localhost|.*\.local)$'])
+    if fetch_only:
+        assert egg_cache is not None
+        easy_ops.extend(['--zip-ok', '--multi-version', '--install-dir', egg_cache])
+        ## FIXME: it would be best to actually remove these eggs at the end:
+        immediate.extend(editable)
+        message = 'Fetching'
+    else:
+        message = 'Installing'
     if immediate:
-        args = _quote_args(find_link_ops + immediate)
-        logger.start_progress('Installing %s\nInstalling ...' % ', '.join(immediate))
+        args = _quote_args(easy_ops + immediate)
+        logger.start_progress('%s %s\n%s ...' % (message, ', '.join(immediate), message))
         logger.indent += 2
         call_subprocess(
             [sys.executable, '-c',
@@ -485,6 +785,8 @@ def install_requirements(logger, plan, src_path, find_links):
             filter_stdout=make_filter_easy_install())
         logger.indent -= 2
         logger.end_progress()
+    if fetch_only:
+        return
     src_path = os.path.abspath(src_path)
     prev_path = os.getcwd()
     try:
@@ -504,7 +806,7 @@ def install_requirements(logger, plan, src_path, find_links):
             else:
                 logger.start_progress('Installing editable %s to %s...' % (req, dir))
                 logger.indent += 2
-                args = _quote_args(find_link_ops + [req])
+                args = _quote_args(easy_ops + [req])
                 cmd = [sys.executable, '-c',
                        "import setuptools.command.easy_install; "
                        "setuptools.command.easy_install.main("
@@ -517,7 +819,7 @@ def install_requirements(logger, plan, src_path, find_links):
             os.chdir(dir)
             call_subprocess(
                 [sys.executable, '-c',
-                 "import setuptools, os; __file__=os.path.abspath(\"setup.py\"); execfile(\"setup.py\")",
+                 "import setuptools; __file__=\"setup.py\"; execfile(\"setup.py\")",
                  "develop"], logger,
                 show_stdout=False, filter_stdout=make_filter_develop())
             if not dir_exists:
@@ -525,6 +827,14 @@ def install_requirements(logger, plan, src_path, find_links):
                 logger.end_progress()
     finally:
         os.chdir(prev_path)
+
+def make_file_url(path):
+    path = os.path.abspath(path)
+    path = path.replace(os.path.sep, '/')
+    return 'file://'+path
+
+############################################################
+## Misc functions
 
 def _quote_args(args):
     return ', '.join([
@@ -592,7 +902,8 @@ def call_subprocess(cmd, logger, show_stdout=True,
             else:
                 logger.info(line)
     else:
-        proc.communicate()
+        returned_stdout, returned_stderr = proc.communicate()
+        all_output = [returned_stdout]
     proc.wait()
     if proc.returncode:
         if raise_on_returncode:
@@ -606,7 +917,10 @@ def call_subprocess(cmd, logger, show_stdout=True,
             logger.warn(
                 "Command %s had error code %s"
                 % (cmd_desc, proc.returncode))
+    if stdout is not None:
+        return ''.join(all_output)
 
+############################################################
 ## Filters for call_subprocess:
 
 def make_filter_easy_install():
@@ -635,8 +949,9 @@ def make_filter_easy_install():
         for regex in [r'references __(file|path)__$',
                       r'^zip_safe flag not set; analyzing',
                       r'MAY be using inspect.[a-zA-Z0-9_]+$',
-                      r'^Extracting .*to',
-                      r'^creating .*\.egg$',
+                      #r'^Extracting .*to',
+                      #r'^creating .*\.egg$',
+                      r": top-level module may be 'python -m' script$",
                       ]:
             if re.search(regex, line.strip()):
                 level = Logger.DEBUG
