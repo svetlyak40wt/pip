@@ -64,7 +64,7 @@ def main(args):
     warn_global_eggs()
 
     settings = dict(find_links=options.find_links, always_unzip=False,
-                    egg_cache=options.egg_cache)
+                    egg_cache=options.egg_cache, variables={})
 
     requirement_lines = read_requirements(logger, options.requirements)
     requirement_lines[:0] = [(a, '.') for a in args]
@@ -325,7 +325,7 @@ def main_freeze(freeze_filename, src, find_tags):
     if freeze_filename == '-':
         logger.move_stdout_to_stderr()
     settings = dict(find_links=[], always_unzip=False,
-                    egg_cache=None)
+                    egg_cache=None, variables={})
     dependency_links = []
     if os.path.exists(freeze_filename):
         logger.notify('Reading settings from %s' % freeze_filename)
@@ -354,6 +354,8 @@ def main_freeze(freeze_filename, src, find_tags):
         print >> f, '-f %s' % link
     if settings['always_unzip']:
         print >> f, '--always-unzip'
+    for setting_name, setting_value in sorted(settings['variables'].items()):
+        print >> f, format_setting(setting_name, setting_value)
     for dist in pkg_resources.working_set:
         if dist.key == 'setuptools' or dist.key == 'poacheggs':
             ## FIXME: also skip virtualenv?
@@ -382,6 +384,13 @@ def main_freeze(freeze_filename, src, find_tags):
     if freeze_filename != '-':
         logger.notify('Put requirements in %s' % freeze_filename)
         f.close()
+
+def format_setting(name, value):
+    lines = value.splitlines()
+    result = '%s = %s' % (name, lines[0])
+    for line in lines[1:]:
+        result += '\n    %s' % line
+    return result
 
 egg_fragment_re = re.compile(r'#egg=(.*)$')
 
@@ -446,7 +455,11 @@ def get_svn_revision(location):
             dirs[:] = []
             continue    # no sense walking uncontrolled subdirs
         dirs.remove('.svn')
-        f = open(os.path.join(base, '.svn', 'entries'))
+        entries_fn = os.path.join(base, '.svn', 'entries')
+        if not os.path.exists(entries_fn):
+            ## FIXME: should we warn?
+            continue
+        f = open(entries_fn)
         data = f.read()
         f.close()
 
@@ -685,7 +698,7 @@ def read_requirements(logger, requirements):
     for fn in requirements:
         logger.info('Reading requirement %s' % fn)
         for line in get_lines(fn):
-            line = line.strip()
+            line = line.rstrip()
             if not line or line.startswith('#'):
                 continue
             match = req_re.search(line)
@@ -702,9 +715,26 @@ def parse_requirements(logger, requirement_lines, settings):
     Parse all the lines of requirements.  Can override options.
     Returns a list of requirements to be installed.
     """
+    print 'lines:', requirement_lines
     options_re = re.compile(r'^--?([a-zA-Z0-9_-]+)\s*')
+    setting_re = re.compile(r'^(\w+)\s*=\s*(.*)$')
     plan = []
+    in_setting = None
+    setting_variables = settings['variables']
     for line, uri in requirement_lines:
+        line = line.rstrip()
+        match = setting_re.search(line)
+        if match:
+            variable = match.group(1)
+            setting_variables[variable] = match.group(2)
+            in_setting = variable
+            continue
+        if line.strip() != line and in_setting:
+            # Continuation line
+            cur = setting_variables[in_setting]
+            setting_variables[in_setting] = cur + '\n' + line.strip()
+            continue
+        in_settting = None
         match = options_re.search(line)
         if match:
             option = match.group(1)
