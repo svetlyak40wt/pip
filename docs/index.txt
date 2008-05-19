@@ -11,6 +11,21 @@ This replicates the ``--requirements`` functionality of `workingenv
 have to use workingenv to use this; in particular it works well with
 `virtualenv <http://pypi.python.org/pypi/virtualenv>`_.
 
+Requirements File Format
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The format of the requirements file is meant to be compatible with
+workingenv requirements files and fassembler requirements files.  In
+brief, "(-f) works like easy_install find_links, (-r) will pull in
+another requirements file, and (-e) will flag a pkg to be checkouted and
+installed development style."
+
+For more information on the requirements file format, see:
+
+http://www.openplans.org/projects/opencore/poacheggs
+
+http://pypi.python.org/pypi/workingenv.py#requirements
+
 News
 ~~~~
 
