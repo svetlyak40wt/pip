@@ -13,6 +13,7 @@ fi
 echo "Creating environment..."
 
 virtualenv TEST-ENV
+mkdir TEST-ENV/src
 
 echo "Environment created"
 echo
@@ -30,12 +31,12 @@ echo "done."
 echo
 
 echo "Installing simple package..."
-echo ./bin/poach-eggs -e INITools
-./bin/poach-eggs -e INITools
+echo ./bin/poach-eggs -e INITools --src=./src/
+./bin/poach-eggs -e INITools --src=./src/
 echo "done."
 echo
 
 echo "Installing requirements..."
-echo ./bin/poach-eggs -v -r https://svn.openplans.org/svn/build/topp.build.opencore/trunk/topp/build/opencore/development-requirements.txt
-./bin/poach-eggs -v -r https://svn.openplans.org/svn/build/topp.build.opencore/trunk/topp/build/opencore/development-requirements.txt
+echo ./bin/poach-eggs -v -r https://svn.openplans.org/svn/build/topp.build.opencore/trunk/topp/build/opencore/development-requirements.txt --src=./src/
+./bin/poach-eggs -v -r https://svn.openplans.org/svn/build/topp.build.opencore/trunk/topp/build/opencore/development-requirements.txt --src=./src/
 echo "done."
