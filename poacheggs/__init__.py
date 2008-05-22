@@ -425,13 +425,14 @@ def get_src_requirement(dist, location, find_tags):
         return dist.as_requirement()
     repo = get_svn_url(location)
     parts = repo.split('/')
+    egg_project_name = dist.egg_name().split('-', 1)[0]
     if parts[-2] in ('tags', 'tag'):
         # It's a tag, perfect!
-        return '-e %s#egg=%s-%s' % (repo, dist.project_name, parts[-1])
+        return '-e %s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
     elif parts[-2] in ('branches', 'branch'):
         # It's a branch :(
         rev = get_svn_revision(location)
-        return '-e %s@%s#egg=%s-%s%s-r%s' % (repo, rev, dist.project_name, dist.version, parts[-1], rev)
+        return '-e %s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
     elif parts[-1] == 'trunk':
         # Trunk :-/
         rev = get_svn_revision(location)
@@ -441,13 +442,13 @@ def get_src_requirement(dist, location, find_tags):
             match = find_tag_match(rev, tag_revs)
             if match:
                 logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
-                return '-e %s/%s#egg=%s-%s' % (tag_url, match, dist.project_name, match)
-        return '-e %s@%s#egg=%s-dev' % (repo, rev, dist.project_name)
+                return '-e %s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
+        return '-e %s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
     else:
         # Don't know what it is
         logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
         rev = get_svn_revision(location)
-        return '-e %s@%s#egg=%s-dev' % (repo, rev, dist.project_name)
+        return '-e %s@%s#egg=%s-dev' % (repo, rev, egg_project_name)
 
 _svn_url_re = re.compile('url="([^"]+)"')
 _svn_rev_re = re.compile('committed-rev="(\d+)"')
