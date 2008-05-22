@@ -1,5 +1,6 @@
 from optparse import OptionParser
-import sys, os
+import sys
+import os
 import pkg_resources
 import logging
 import re
@@ -353,12 +354,12 @@ def main_freeze(freeze_filename, srcs, find_tags):
     for link in settings['find_links']:
         if '#egg' in link:
             dependency_links.append(link)
+    for setting_name, setting_value in sorted(settings['variables'].items()):
+        print >> f, format_setting(setting_name, setting_value)
     for link in sorted(settings['find_links']):
         print >> f, '-f %s' % link
     if settings['always_unzip']:
         print >> f, '--always-unzip'
-    for setting_name, setting_value in sorted(settings['variables'].items()):
-        print >> f, format_setting(setting_name, setting_value)
     packages = sorted(pkg_resources.working_set, key=lambda d: d.project_name)
     for dist in packages:
         if dist.key == 'setuptools' or dist.key == 'poacheggs':
