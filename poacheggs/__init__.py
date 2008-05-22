@@ -383,9 +383,9 @@ def main_freeze(freeze_filename, srcs, find_tags):
                 if not svn_location:
                     logger.warn(
                         'Warning: cannot find svn location for %s' % req)
-                    print >> f, '# could not find svn URL in dependency_links for any package'
+                    print >> f, '# could not find svn URL in dependency_links for this package:'
                 else:
-                    print >> f, '# installing editable to satisfy requirement %s' % req
+                    print >> f, '# installing as editable to satisfy requirement %s:' % req
                     req = '-e %s@%s' % (svn_location, match.group(1))
         print >> f, req
     if freeze_filename != '-':
