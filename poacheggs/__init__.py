@@ -57,7 +57,9 @@ def main(args):
         return
 
     if options.freeze_filename:
-        main_freeze(options.freeze_filename, options.src, options.freeze_find_tags)
+        srcs = [options.src] + options.find_src
+        srcs = [dir for dir in srcs if dir]
+        main_freeze(options.freeze_filename, srcs, options.freeze_find_tags)
         warn_global_eggs()
         return
 
@@ -192,7 +194,7 @@ parser.add_option('--find-src',
                   dest='find_src',
                   metavar='DIR',
                   action='append',
-                  default=(),
+                  default=[],
                   help='A directory where source checkouts can be found')
 
 parser.add_option('--freeze',
@@ -321,7 +323,7 @@ def update_distutils_file(filename, section, name, value, append):
 
 rev_re = re.compile(r'-r(\d+)$')
 
-def main_freeze(freeze_filename, src, find_tags):
+def main_freeze(freeze_filename, srcs, find_tags):
     if freeze_filename == '-':
         logger.move_stdout_to_stderr()
     settings = dict(find_links=[], always_unzip=False,
@@ -341,29 +343,34 @@ def main_freeze(freeze_filename, src, find_tags):
         f = sys.stdout
     else:
         f = open(freeze_filename, 'w')
-    src = os.path.normcase(os.path.abspath(src))
-    if not os.path.exists(src):
-        logger.warn('src directory %s does not exist' % src)
+    srcs = [os.path.normcase(os.path.abspath(os.path.expanduser(src))) for src in srcs]
+    for src in srcs:
+        if not os.path.exists(src):
+            logger.warn('src directory %s does not exist' % src)
     for dist in pkg_resources.working_set:
         if dist.has_metadata('dependency_links.txt'):
             dependency_links.extend(dist.get_metadata_lines('dependency_links.txt'))
     for link in settings['find_links']:
         if '#egg' in link:
             dependency_links.append(link)
-    for link in settings['find_links']:
+    for link in sorted(settings['find_links']):
         print >> f, '-f %s' % link
     if settings['always_unzip']:
         print >> f, '--always-unzip'
     for setting_name, setting_value in sorted(settings['variables'].items()):
         print >> f, format_setting(setting_name, setting_value)
-    for dist in pkg_resources.working_set:
+    packages = sorted(pkg_resources.working_set, key=lambda d: d.project_name)
+    for dist in packages:
         if dist.key == 'setuptools' or dist.key == 'poacheggs':
             ## FIXME: also skip virtualenv?
             continue
         location = os.path.normcase(os.path.abspath(dist.location))
         if os.path.exists(os.path.join(location, '.svn')):
-            if not location.startswith(src):
-                logger.warn('Warning: svn checkout not in src (%s): %s' % (src, location))
+            for src in srcs:
+                if location.startswith(src):
+                    break
+            else:
+                logger.warn('Warning: svn checkout not in any src (%s): %s' % (', '.join(srcs), location))
             req = get_src_requirement(dist, location, find_tags)
         else:
             req = dist.as_requirement()
@@ -378,8 +385,8 @@ def main_freeze(freeze_filename, src, find_tags):
                         'Warning: cannot find svn location for %s' % req)
                     print >> f, '# could not find svn URL in dependency_links for any package'
                 else:
-                    print >> f, '# to satisfy requirement %s' % req
-                    req = '--editable %s@%s' % (svn_location, match.group(1))
+                    print >> f, '# installing editable to satisfy requirement %s' % req
+                    req = '-e %s@%s' % (svn_location, match.group(1))
         print >> f, req
     if freeze_filename != '-':
         logger.notify('Put requirements in %s' % freeze_filename)
@@ -388,8 +395,10 @@ def main_freeze(freeze_filename, src, find_tags):
 def format_setting(name, value):
     lines = value.splitlines()
     result = '%s = %s' % (name, lines[0])
+    # Lines up following ilnes with the first line value:
+    padding = ' '*(len(name)+3)
     for line in lines[1:]:
-        result += '\n    %s' % line
+        result += '\n%s%s' % (padding, line)
     return result
 
 egg_fragment_re = re.compile(r'#egg=(.*)$')
