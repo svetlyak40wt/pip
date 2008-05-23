@@ -744,7 +744,7 @@ def parse_requirements(logger, requirement_lines, settings):
     Returns a list of requirements to be installed.
     """
     options_re = re.compile(r'^--?([a-zA-Z0-9_-]+)\s*')
-    setting_re = re.compile(r'^(\w+)\s*=\s*(.*)$')
+    setting_re = re.compile(r'^(\w+)\s*=\s*([^=<>\s].*)$')
     plan = []
     in_setting = None
     setting_variables = settings['variables']
