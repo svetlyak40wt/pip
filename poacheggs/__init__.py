@@ -27,6 +27,9 @@ class BadCommand(Exception):
         return replacement
     catcher = classmethod(catcher)
 
+# Will get redefined in main():
+logger = None
+
 @BadCommand.catcher
 def main(args):
     global logger
@@ -504,6 +507,16 @@ def get_svn_revision(location):
     return revision
 
 def get_svn_url(location):
+    # In cases where the source is in a subdirectory, not alongside setup.py
+    # we have to look up in the location until we find a real setup.py
+    orig_location = location
+    while not os.path.exists(os.path.join(location, 'setup.py')):
+        location = os.path.dirname(location)
+        if not location:
+            # We've traversed up to the root of the filesystem without finding setup.py
+            logger.warn("Could not find setup.py for directory %s (tried all parent directories)"
+                        % orig_location)
+            return None
     f = open(os.path.join(location, '.svn', 'entries'))
     data = f.read()
     f.close()
