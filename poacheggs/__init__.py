@@ -390,7 +390,8 @@ def main_freeze(freeze_filename, srcs, find_tags):
                     print >> f, '# could not find svn URL in dependency_links for this package:'
                 else:
                     print >> f, '# installing as editable to satisfy requirement %s:' % req
-                    req = '-e %s@%s' % (svn_location, match.group(1))
+                    req = '-e %s@%s#egg=%s' % (svn_location, match.group(1), dist.egg_name())
+        assert req is not None, "Got None requirement for dist %r" % dist
         print >> f, req
     if freeze_filename != '-':
         logger.notify('Put requirements in %s' % freeze_filename)
@@ -428,6 +429,8 @@ def get_src_requirement(dist, location, find_tags):
         logger.warn('cannot determine version of editable source in %s (is not svn checkout)' % location)
         return dist.as_requirement()
     repo = get_svn_url(location)
+    if repo is None:
+        return None
     parts = repo.split('/')
     egg_project_name = dist.egg_name().split('-', 1)[0]
     if parts[-2] in ('tags', 'tag'):
@@ -511,8 +514,9 @@ def get_svn_url(location):
     # we have to look up in the location until we find a real setup.py
     orig_location = location
     while not os.path.exists(os.path.join(location, 'setup.py')):
+        last_location = location
         location = os.path.dirname(location)
-        if not location:
+        if location == last_location:
             # We've traversed up to the root of the filesystem without finding setup.py
             logger.warn("Could not find setup.py for directory %s (tried all parent directories)"
                         % orig_location)
@@ -739,7 +743,6 @@ def parse_requirements(logger, requirement_lines, settings):
     Parse all the lines of requirements.  Can override options.
     Returns a list of requirements to be installed.
     """
-    print 'lines:', requirement_lines
     options_re = re.compile(r'^--?([a-zA-Z0-9_-]+)\s*')
     setting_re = re.compile(r'^(\w+)\s*=\s*(.*)$')
     plan = []
