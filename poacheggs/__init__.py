@@ -333,6 +333,7 @@ def main_freeze(freeze_filename, srcs, find_tags):
     settings = dict(find_links=[], always_unzip=False,
                     egg_cache=None, variables={})
     dependency_links = []
+    existing_projects = set()
     if os.path.exists(freeze_filename):
         logger.notify('Reading settings from %s' % freeze_filename)
         lines = read_requirements(logger, [freeze_filename])
@@ -343,6 +344,12 @@ def main_freeze(freeze_filename, srcs, find_tags):
                 continue
             if item.startswith('http:') or item.startswith('https:'):
                 dependency_links.append(item)
+            project_name = find_project_name_from_plan(item)
+            if project_name:
+                existing_projects.add(project_name)
+            else:
+                logger.notify(
+                    'Cannot determine the project name for this item of the plan: %s' % item)
     if freeze_filename == '-':
         f = sys.stdout
     else:
@@ -363,8 +370,11 @@ def main_freeze(freeze_filename, srcs, find_tags):
         print >> f, '-f %s' % link
     if settings['always_unzip']:
         print >> f, '--always-unzip'
-    packages = sorted(pkg_resources.working_set, key=lambda d: d.project_name)
-    for dist in packages:
+    # This will be a list of dicts, with the dicts looking like:
+    #   {'editable': true/false, 'existing': true/false, 'project_name':..., 'lines':[...]}
+    installations = []
+    for dist in pkg_resources.working_set:
+        lines = []
         if dist.key == 'setuptools' or dist.key == 'poacheggs':
             ## FIXME: also skip virtualenv?
             continue
@@ -374,9 +384,11 @@ def main_freeze(freeze_filename, srcs, find_tags):
                 if location.startswith(src):
                     break
             else:
-                logger.warn('Warning: svn checkout not in any src (%s): %s' % (', '.join(srcs), location))
+                logger.info('Note: svn checkout not in any src (%s): %s' % (', '.join(srcs), location))
             req = get_src_requirement(dist, location, find_tags)
+            editable = 1
         else:
+            editable = False
             req = dist.as_requirement()
             specs = req.specs
             assert len(specs) == 1 and specs[0][0] == '=='
@@ -387,15 +399,32 @@ def main_freeze(freeze_filename, srcs, find_tags):
                 if not svn_location:
                     logger.warn(
                         'Warning: cannot find svn location for %s' % req)
-                    print >> f, '# could not find svn URL in dependency_links for this package:'
+                    lines.append('# FIXME: could not find svn URL in dependency_links for this package:')
                 else:
-                    print >> f, '# installing as editable to satisfy requirement %s:' % req
+                    lines.append('# installing as editable to satisfy requirement %s:' % req)
                     req = '-e %s@%s#egg=%s' % (svn_location, match.group(1), dist.egg_name())
+                    editable = 2
         assert req is not None, "Got None requirement for dist %r" % dist
-        print >> f, req
+        lines.append(req)
+        existing = dist.project_name in existing_projects
+        installations.append(dict(
+            editable=editable, existing=existing, project_name=dist.project_name,
+            lines=lines))
+    installations.sort(
+        key=lambda item: (-item['existing'], -item['editable'], item['project_name'].lower()))
+    for item in installations:
+        for line in item['lines']:
+            print >> f, line
     if freeze_filename != '-':
         logger.notify('Put requirements in %s' % freeze_filename)
         f.close()
+
+def find_project_name_from_plan(line):
+    match = egg_fragment_re.search(line)
+    if match:
+        return match.group(0).split('-')[0]
+    req = pkg_resources.Requirement.parse(line)
+    return req.project_name
 
 def format_setting(name, value):
     lines = value.splitlines()
