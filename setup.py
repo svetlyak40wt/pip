@@ -1,7 +1,10 @@
-from setuptools import setup, find_packages
-import sys, os
+try:
+    from setuptools import setup
+except ImportError:
+    from distutils.core import setup
+import os
 
-version = '0.3(svn)'
+version = '0.3'
 
 doc_dir = os.path.join(os.path.dirname(__file__), 'docs')
 index_filename = os.path.join(doc_dir, 'index.txt')
@@ -20,7 +23,7 @@ setup(name='PoachEggs',
       author_email='whit@openplans.org',
       url='http://pypi.python.org/pypi/PoachEggs',
       license='MIT',
-      packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
+      py_modules=['poacheggs'],
       include_package_data=True,
       zip_safe=True,
       entry_points="""
