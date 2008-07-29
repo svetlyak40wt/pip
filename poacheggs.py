@@ -7,6 +7,7 @@ import logging
 import re
 import urlparse
 import urllib2
+import urllib
 import subprocess
 
 my_package = pkg_resources.get_distribution('poacheggs')
@@ -35,6 +36,9 @@ logger = None
 def main(args):
     global logger
     options, args = parser.parse_args(args)
+    if options.venv:
+        restart_in_venv(options.venv)
+        return
     if options.distutils_cfg:
         if args or options.requirements or options.editable:
             raise BadCommand('If you use --distutils-cfg you cannot install any packages')
@@ -211,6 +215,23 @@ parser.add_option('--freeze-find-tags',
                   dest='freeze_find_tags',
                   action='store_true',
                   help='If freezing a trunk, see if there\'s a workable tag (can be slow)')
+
+parser.add_option('-e', '--environment',
+                  dest='venv',
+                  metavar='DIR',
+                  help='virtualenv to run poacheggs in (either the interpreter or base directory')
+
+def restart_in_venv(venv):
+    """
+    Restart this script using the interpreter in the given virtual environment
+    """
+    python = os.path.exists(os.path.join(venv, 'bin', 'python'))
+    if not os.path.exists(python):
+        python = venv
+    if not os.path.exists(python):
+        raise BadCommand('Cannot find virtual environment interpreter at %s' % python)
+    os.execv(python, [python, __file__] + sys.argv[1:])
+    
 
 def warn_global_eggs():
     if hasattr(sys, 'real_prefix'):
@@ -917,8 +938,8 @@ def install_requirements(logger, plan, src_path, find_links,
 
 def make_file_url(path):
     path = os.path.abspath(path)
-    path = path.replace(os.path.sep, '/')
-    return 'file://'+path
+    path = path.replace(os.path.sep, '/').lstrip('/')
+    return 'file:///'+urllib.quote(path)
 
 ############################################################
 ## Misc functions
