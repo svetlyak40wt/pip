@@ -25,6 +25,11 @@ def run_poach(*args, **kw):
         print result
     return result
 
+def write_file(filename, text):
+    f = open(os.path.join(base_path, filename), 'w')
+    f.write(text)
+    f.close()
+
 import optparse
 parser = optparse.OptionParser(usage='%prog [OPTIONS] [TEST_FILE...]')
 parser.add_option('--first', action='store_true',
@@ -38,7 +43,7 @@ def main():
     global options
     options, args = parser.parse_args()
     if not args:
-        args = ['test_poacheggs.txt', 'test_requirements.txt']
+        args = ['test_basic.txt', 'test_requirements.txt', 'test_collect.txt']
     optionflags = doctest.ELLIPSIS
     if options.first:
         optionflags |= doctest.REPORT_ONLY_FIRST_FAILURE

@@ -119,7 +119,7 @@ def main(args):
         if not os.path.exists(options.egg_cache):
             logger.notify('Creating egg cache directory %s' % options.egg_cache)
             os.makedirs(options.egg_cache)
-        spec.cache_eggs(options.egg_cache)
+        spec.cache_eggs(env, options.egg_cache)
     elif spec.items:
         logger.debug('Installing with prefix %s' % sys.prefix)
         if not sys.executable.startswith(sys.prefix):
@@ -600,6 +600,60 @@ class InstallItem(object):
             return
         self.easy_install(spec, env, ['--zip-ok', '--multi-version', '--install-dir', cache_dir])
 
+    _svn_url_re = re.compile(r'^URL: (.+)')
+
+    ## FIXME: move to svn_checkout method:
+    def svn_checkout(self, dir):
+        href = self.source_location
+        message = 'Checking out %s' % href
+        if '@' in href:
+            href, rev = href.split('@', 1)
+            command.extend(['-r', rev])
+            message = 'Checking out %s revision %s' % (href, rev)
+        if os.path.exists(dir):
+            result = call_subprocess(['svn', 'info', dir], show_stdout=False)
+            match = self._svn_url_re.search(result)
+            assert match, (
+                "svn info %s gave unexpected output:\n%s"
+                % (dir, result))
+            prev_url = match.group(1)
+            if prev_url != href:
+                print 'The directory %s is already an svn checkout' % dir
+                print 'The current checkout is from:   %s' % prev_url
+                print 'The new checkout would be from: %s' % svn_location
+                while 1:
+                    answer = raw_input('Would you like to (s)witch, (i)gnore, (r)eplace/wipe, (b)ackup? ')
+                    answer = answer.strip().lower()
+                    if answer not in ['s', 'i', 'r', 'b']:
+                        print 'I do not understand the answer: %r' % answer
+                    else:
+                        break
+                if answer == 'i':
+                    logger.notify('Ignoring the incorrect repository located at %s' % dir)
+                    return
+                elif answer == 's':
+                    logger.notify('Switching the repository %s to the location %s' % (dir, svn_location))
+                    call_subprocess(
+                        ['svn', 'switch', svn_location, dir])
+                elif answer == 'b':
+                    n = 1
+                    backup = dir + '.bak'
+                    while os.path.exists(backup):
+                        n += 1
+                        backup = dir + 'bak%s' % n
+                    logger.notify('Backing up directory %s to %s' % (dir, backup))
+                    shutil.move(dir, backup)
+                else:
+                    logger.notify('Removing directory %s' % dir)
+                    shutil.rmtree(dir)
+        ## FIXME: The output here should be filtered in some fashion:
+        if os.path.exists(dir):
+            logger.notify('Updating svn checkout %s' % dir)
+            call_subprocess(['svn', 'update', dir])
+        else:
+            logger.notify('Checking out %s to %s' % (svn_location, dir))
+        call_subprocess(['svn', 'checkout', svn_location, dir])
+
     def svn_checkout(self, dir):
         """Check out this package into the given `dir` directory."""
         href = self.source_location
@@ -804,7 +858,6 @@ def format_setting(name, value):
     return result
 
 egg_fragment_re = re.compile(r'#egg=(.*)$')
-svn_url_re = re.compile(r'^URL: (.+)')
 
 def get_svn_location(dist, dependency_links):
     keys = []
