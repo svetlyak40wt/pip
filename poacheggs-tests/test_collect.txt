@@ -1,0 +1,23 @@
+Basic setup::
+
+    >>> import os
+    >>> from __main__ import base_path, reset_env, run_poach, pyversion, lib_py, write_file
+
+Some tests of caching::
+
+    >>> reset_env()
+    >>> write_file('initools-req.txt', '''\
+    ... INITools==0.2
+    ... # and something else to test out:
+    ... simplejson<=1.7.4
+    ... ''')
+    >>> result = run_poach('--collect', '--egg-cache', 'cache-eggs', '-r', 'initools-req.txt')
+    >>> print result
+    Script result: python ../../poacheggs.py -E .../test-scratch --collect --egg-cache cache-eggs -r initools-req.txt
+    -- stdout: --------------------
+    Creating egg cache directory cache-eggs
+    <BLANKLINE>
+    -- created: -------------------
+      cache-eggs
+          INITools-0.2-py....egg  (... bytes)
+          simplejson-....egg  (... bytes)
