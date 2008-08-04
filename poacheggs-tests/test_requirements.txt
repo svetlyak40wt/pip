@@ -1,0 +1,40 @@
+Basic setup::
+
+    >>> import os
+    >>> from __main__ import base_path, reset_env, run_poach, pyversion, lib_py
+    >>> def write_file(filename, text):
+    ...     f = open(os.path.join(base_path, filename), 'w')
+    ...     f.write(text)
+    ...     f.close()
+
+Some tests of requirement files::
+
+    >>> reset_env()
+    >>> write_file('initools-req.txt', '''\
+    ... INITools==0.2
+    ... # and something else to test out:
+    ... simplejson<=1.7.4
+    ... ''')
+    >>> result = run_poach('-r', 'initools-req.txt')
+    >>> len(result.wildcard_matches('lib/python*/site-packages/INITools-0.2-py*.egg'))
+    1
+    >>> dirs = result.wildcard_matches('lib/python*/site-packages/simplejson*')
+    >>> len(dirs)
+    1
+    >>> dirs[0].dir
+    True
+
+Now with more than one file::
+
+    >>> reset_env()
+    >>> write_file('initools-req.txt', '''\
+    ... -e http://svn.colorstudy.com/INITools/trunk@3139#egg=INITools-dev
+    ... -r simplejson-req.txt''')
+    >>> write_file('simplejson-req.txt', '''\
+    ... simplejson<=1.7.4
+    ... ''')
+    >>> result = run_poach('-r', 'initools-req.txt')
+    >>> len(result.wildcard_matches('lib/python*/site-packages/simplejson*'))
+    1
+    >>> assert 'src/initools' in result.files_created
+
