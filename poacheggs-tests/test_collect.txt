@@ -21,3 +21,34 @@ Some tests of caching::
       cache-eggs
           INITools-0.2-py....egg  (... bytes)
           simplejson-....egg  (... bytes)
+
+Now to use that cache::
+
+    >>> result = run_poach('-vv', '--cache-only', '--egg-cache', 'cache-eggs', '-r', 'initools-req.txt')
+    >>> len(result.wildcard_matches('lib/python*/site-packages/INITools-0.2*.egg'))
+    1
+    >>> len(result.wildcard_matches('lib/python*/site-packages/simplejson-1.7.4*.egg'))
+    1
+
+Now to make sure it only runs with the cache in place::
+
+    >>> reset_env()
+    >>> write_file('initools-req.txt', '''\
+    ... INITools==0.2
+    ... # and something else to test out:
+    ... simplejson<=1.7.4
+    ... ''')
+    >>> result = run_poach('-vv', '--cache-only', '--egg-cache', 'cache-eggs', '-r', 'initools-req.txt', expect_error=True)
+    >>> print result
+    Script result: python ../../poacheggs.py -E .../poacheggs-tests/test-scratch -vv --cache-only --egg-cache cache-eggs -r initools-req.txt
+      return code: 2
+    -- stdout: --------------------
+    Reading requirement initools-req.txt
+    Complete requirements:
+      INITools==0.2
+      simplejson<=1.7.4
+    ...
+    No local packages or download links found for INITools==0.2
+    error: Could not find suitable distribution for Requirement.parse('INITools==0.2')
+    ...
+    >>> None

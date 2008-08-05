@@ -41,6 +41,9 @@ class SpecSyntaxError(Exception):
         self.source = source
         self.line_number = line_number
 
+class CommandError(OSError):
+    pass
+
 # Will get redefined in main():
 logger = None
 
@@ -96,7 +99,7 @@ def main(args):
         return
 
     warn_global_eggs()
-    env = Environment(src=options.src)
+    env = Environment(src=options.src, cache_only=options.cache_only)
     try:
         spec = InstallSpec.parse_requirements(options.requirements, args, options.editable)
     except SpecSyntaxError, e:
@@ -125,7 +128,8 @@ def main(args):
         if not sys.executable.startswith(sys.prefix):
             logger.debug('Python interpreter: %s' % sys.executable)
         if options.egg_cache:
-            env.find_links.append(make_file_url(options.egg_cache))
+            #spec.find_links.append(make_file_url(options.egg_cache))
+            spec.find_links.append(options.egg_cache)
         spec.install(env)
     else:
         logger.notify('Nothing to install')
@@ -169,12 +173,6 @@ parser.add_option('-f', '--find-links',
                   default=[],
                   metavar="URL",
                   help="Extra locations/URLs where packages can be found (sets up your distutils.cfg for future installs)")
-
-parser.add_option('--force',
-                  action="store_false",
-                  dest="interactive",
-                  default=True,
-                  help="Overwrite files without asking")
 
 parser.add_option('--confirm',
                   dest='confirm',
@@ -321,7 +319,7 @@ def find_distutils_file():
         logger.fatal(
             'Could not find any existing writable config file (tried options %s)'
             % ', '.join(files))
-        raise OSError("No config files found")
+        raise IOError("No config files found")
     if len(files) > 1:
         logger.notify(
             "Choosing file %s among writable options %s"
@@ -385,9 +383,10 @@ class Environment(object):
     `python`: the interpreter to use in subcommands
     """
 
-    def __init__(self, src=None, python=sys.executable):
+    def __init__(self, src=None, python=sys.executable, cache_only=False):
         self.src = src
         self.python = python
+        self.cache_only = cache_only
 
     def install_dir(self, package_name):
         return os.path.join(self.src, package_name.lower())
@@ -686,7 +685,11 @@ class InstallItem(object):
             logger.indent -= 2
 
     def easy_install(self, spec, env, options=None):
-        command = [env.python, '-c', 'import setuptools.command.easy_install; setuptools.command.easy_install.main()', '-q']
+        command = [env.python, '-c', 'import setuptools.command.easy_install; setuptools.command.easy_install.main()']
+        if not logger.stdout_level_matches(logger.DEBUG):
+            command.append('-q')
+        if env.cache_only:
+            command.extend(['--allow-hosts', 'localhost'])
         if spec.always_unzip:
             command.append('--always-unzip')
         if spec.find_links:
@@ -701,7 +704,11 @@ class InstallItem(object):
             command.append(self.package_name)
         logger.indent += 2
         try:
-            call_subprocess(command, show_stdout=False, filter_stdout=make_filter_easy_install())
+            try:
+                call_subprocess(command, show_stdout=False, filter_stdout=make_filter_easy_install())
+            except CommandError, e:
+                logger.fatal('easy_install failed: %s' % e)
+                raise BadCommand('')
         finally:
             logger.indent -= 2
 
@@ -1286,7 +1293,7 @@ def call_subprocess(cmd, show_stdout=True,
             if all_output:
                 logger.notify('Complete output from command %s:' % cmd_desc)
                 logger.notify('\n'.join(all_output) + '\n----------------------------------------')
-            raise OSError(
+            raise CommandError(
                 "Command %s failed with error code %s"
                 % (cmd_desc, proc.returncode))
         else:
