@@ -1,6 +1,10 @@
 Poach Eggs
 ==========
 
+.. toctree::
+
+   requirement-format
+
 This script installs a set of packages at once using
 ``easy_install``.  It improves on the output of easy_install and also
 allows you to define a set of working packages, separately from the
@@ -11,28 +15,7 @@ This replicates the ``--requirements`` functionality of `workingenv
 have to use workingenv to use this; in particular it works well with
 `virtualenv <http://pypi.python.org/pypi/virtualenv>`_.
 
-Requirements File Format
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The format of the requirements file is meant to be compatible with
-workingenv requirements files and fassembler requirements files.  In
-brief, "(-f) works like easy_install find_links, (-r) will pull in
-another requirements file, and (-e) will flag a pkg to be checkouted and
-installed development style."
-
-For more information on the requirements file format, see:
-
-http://www.openplans.org/projects/opencore/poacheggs
-
-http://pypi.python.org/pypi/workingenv.py#requirements
-
 News
 ~~~~
 
-svn trunk
----------
-
-* Added ``--distutils-cfg`` option.
-
-* Warn about globally-installed eggs when in a workingenv or
-  virtualenv.
+None yet, because there's been no release.
