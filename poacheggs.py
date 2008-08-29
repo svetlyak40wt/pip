@@ -93,7 +93,7 @@ def main(args):
     if options.freeze_filename:
         srcs = [options.src] + options.find_src
         srcs = [dir for dir in srcs if dir]
-        main_freeze(options.freeze_filename, srcs, options.freeze_find_tags)
+        main_freeze(options.freeze_filename, srcs, options.freeze_find_tags, options.find_links)
         ## FIXME: why is this after main_freeze?
         warn_global_eggs()
         return
@@ -755,11 +755,12 @@ class InstallItem(object):
 ## Freezing
 
 rev_re = re.compile(r'-r(\d+)$')
+date_re = re.compile(r'-(20\d\d\d\d\d\d)$')
 
-def main_freeze(freeze_filename, srcs, find_tags):
+def main_freeze(freeze_filename, srcs, find_tags, find_links):
     if freeze_filename == '-':
         logger.move_stdout_to_stderr()
-    settings = dict(find_links=[], always_unzip=False,
+    settings = dict(find_links=list(find_links), always_unzip=False,
                     egg_cache=None, variables={})
     dependency_links = []
     existing_projects = set()
@@ -823,7 +824,8 @@ def main_freeze(freeze_filename, srcs, find_tags):
             assert len(specs) == 1 and specs[0][0] == '=='
             version = specs[0][1]
             match = rev_re.search(version)
-            if match:
+            date_match = date_re.search(version)
+            if match or date_match:
                 svn_location = get_svn_location(dist, dependency_links)
                 if not svn_location:
                     logger.warn(
@@ -831,7 +833,11 @@ def main_freeze(freeze_filename, srcs, find_tags):
                     lines.append('# FIXME: could not find svn URL in dependency_links for this package:')
                 else:
                     lines.append('# installing as editable to satisfy requirement %s:' % req)
-                    req = '-e %s@%s#egg=%s' % (svn_location, match.group(1), dist.egg_name())
+                    if match:
+                        rev = match.group(1)
+                    else:
+                        rev = '{%s}' % date_match.group(1)
+                    req = '-e %s@%s#egg=%s' % (svn_location, rev, dist.egg_name())
                     editable = 2
         assert req is not None, "Got None requirement for dist %r" % dist
         lines.append(req)
