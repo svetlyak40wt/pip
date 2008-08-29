@@ -14,21 +14,21 @@ setup(name='PoachEggs',
       description="Install a batch of packages at once",
       long_description=open(index_filename).read(),
       classifiers=[
+        'Development Status :: 4 - Beta',
         #'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
+        'Topic :: Software Development :: Build Tools',
       ],
       keywords='virtualenv setuptools egg',
-      author='whit',
-      author_email='whit@openplans.org',
+      author='The Open Planning Project',
+      author_email='python-virtualenv@groups.google.com',
       url='http://pypi.python.org/pypi/PoachEggs',
       license='MIT',
       py_modules=['poacheggs'],
-      include_package_data=True,
-      zip_safe=True,
       entry_points="""
       [console_scripts]
-      poach-eggs = poacheggs:main
+      poacheggs = poacheggs:main
       """,
       )
       
