@@ -48,9 +48,9 @@ class CommandError(OSError):
 logger = None
 
 @BadCommand.catcher
-def main(args):
+def main(initial_args):
     global logger
-    options, args = parser.parse_args(args)
+    options, args = parser.parse_args(initial_args)
     if args and args[-1] == '___VENV_RESTART___':
         venv_location = args[-2]
         args = args[:-2]
@@ -61,7 +61,7 @@ def main(args):
         if options.verbose > 0 or 1:
             # The logger isn't setup yet
             print 'Running in environment %s' % options.venv
-        restart_in_venv(options.venv)
+        restart_in_venv(options.venv, initial_args)
         # restart_in_venv should actually never return, but for clarity...
         return
     if options.distutils_cfg:
@@ -241,7 +241,7 @@ parser.add_option('-E', '--environment',
                   metavar='DIR',
                   help='virtualenv to run poacheggs in (either the interpreter or base directory')
 
-def restart_in_venv(venv):
+def restart_in_venv(venv, args):
     """
     Restart this script using the interpreter in the given virtual environment
     """
@@ -255,7 +255,7 @@ def restart_in_venv(venv):
     if not os.path.exists(python):
         raise BadCommand('Cannot find virtual environment interpreter at %s' % python)
     base = os.path.dirname(os.path.dirname(python))
-    os.execv(python, [python, __file__] + sys.argv[1:] + [base, '___VENV_RESTART___'])
+    os.execv(python, [python, __file__] + args + [base, '___VENV_RESTART___'])
     
 
 def warn_global_eggs():
