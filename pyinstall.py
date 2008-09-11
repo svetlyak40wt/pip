@@ -14,6 +14,7 @@ import re
 import shutil
 import md5
 import urlparse
+from email.FeedParser import FeedParser
 import poacheggs
 
 class InstallationError(Exception):
@@ -213,12 +214,12 @@ class PackageFinder(object):
 
 class InstallRequirement(object):
 
-    def __init__(self, req, comes_from, built_dir=None, installed=False):
+    def __init__(self, req, comes_from, source_dir=None, installed=False):
         if isinstance(req, basestring):
             req = pkg_resources.Requirement.parse(req)
         self.req = req
         self.comes_from = comes_from
-        self.built_dir = built_dir
+        self.source_dir = source_dir
         self.installed = installed
 
     def __str__(self):
@@ -238,10 +239,10 @@ class InstallRequirement(object):
 
     @property
     def setup_py(self):
-        return os.path.join(self.built_dir, 'setup.py')
+        return os.path.join(self.source_dir, 'setup.py')
 
     def run_egg_info(self):
-        assert self.built_dir
+        assert self.source_dir
         logger.notify('Running setup.py egg_info for package %s' % self.name)
         logger.indent += 2
         try:
@@ -249,8 +250,8 @@ class InstallRequirement(object):
             script = script.replace('__SETUP_PY__', repr(self.setup_py))
             script = script.replace('__PKG_NAME__', repr(self.name))
             poacheggs.call_subprocess(
-                [sys.executable, '-c', script, 'egg_info'],
-                cwd=self.built_dir, filter_stdout=self._filter_install, show_stdout=False)
+                [sys.executable, '-c', script, 'egg_info', '--egg-base', '.'],
+                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
 
@@ -272,8 +273,8 @@ execfile(__file__)
 """
 
     def egg_info_data(self, filename):
-        assert self.built_dir
-        fn = os.path.join(self.built_dir, self.name + '.egg-info', filename)
+        assert self.source_dir
+        fn = os.path.join(self.source_dir, self.name + '.egg-info', filename)
         if not os.path.exists(fn):
             return None
         fp = open(fn, 'r')
@@ -292,6 +293,11 @@ execfile(__file__)
                 continue
             result.append(line)
         return result
+
+    def pkg_info(self):
+        p = FeedParser()
+        p.feed(self.egg_info_data('PKG-INFO') or '')
+        return p.close()
 
     @property
     def dependency_links(self):
@@ -317,10 +323,32 @@ execfile(__file__)
             if qualifier == '==':
                 yield version
 
+    @property
+    def installed_version(self):
+        return self.pkg_info()['version']
+
+    def assert_source_matches_version(self):
+        assert self.source_dir
+        if self.comes_from == 'command line':
+            # We don't check the versions of things explicitly installed.
+            # This makes, e.g., "pyinstall Package==dev" possible
+            return
+        version = self.installed_version
+        if version not in self.req:
+            logger.fatal(
+                'Source in %s has the version %s, which does not match the requirement %s'
+                % (self.source_dir, version, self))
+            raise InstallationError(
+                'Source in %s has version %s that conflicts with %s' 
+                % (self.source_dir, version, self))
+        else:
+            logger.debug('Source in %s has version %s, which satisfies requirement %s'
+                         % (self.source_dir, version, self))
+
     def install(self):
         ## FIXME: this is not a useful record:
         ## Also a bad location
-        record_filename = os.path.join(os.path.dirname(os.path.dirname(self.built_dir)), 'install-record.txt')
+        record_filename = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'install-record.txt')
         logger.notify('Running setup.py install for %s' % self.name)
         logger.indent += 2
         try:
@@ -328,7 +356,7 @@ execfile(__file__)
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
                  'install', '--single-version-externally-managed', '--record', record_filename],
-                cwd=self.built_dir, filter_stdout=self._filter_install, show_stdout=False)
+                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
 
@@ -369,8 +397,9 @@ class RequirementSet(object):
                 if not os.path.exists(os.path.join(location, 'setup.py')):
                     url = finder.find_requirement(req_to_install)
                     self.unpack_url(url, location)
-                req_to_install.built_dir = location
+                req_to_install.source_dir = location
                 req_to_install.run_egg_info()
+                req_to_install.assert_source_matches_version()
                 ## FIXME: shouldn't be globally added:
                 finder.add_dependency_links(req_to_install.dependency_links)
                 ## FIXME: add extras in here:
