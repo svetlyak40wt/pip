@@ -430,7 +430,11 @@ class RequirementSet(object):
             md5hash = match.group(1)
         else:
             md5hash = None
-        resp = urllib2.urlopen(url.split('#', 1)[0])
+        try:
+            resp = urllib2.urlopen(url.split('#', 1)[0])
+        except urllib2.HTTPError, e:
+            logger.fatal("HTTP error %s while getting %s" % (e.code, url))
+            raise
         content_type = resp.info()['content-type']
         filename = filename_for_url(url)
         ext = os.path.splitext(filename)
