@@ -12,7 +12,8 @@ import subprocess
 import posixpath
 import re
 import shutil
-from poacheggs import Logger
+import md5
+import poacheggs
 
 class InstallationError(Exception):
     """General exception during installation"""
@@ -21,10 +22,11 @@ class DistributionNotFound(InstallationError):
     """Raised when a distribution cannot be found to satisfy a requirement"""
 
 if getattr(sys, 'real_prefix', None):
+    ## FIXME: is src/ really good?  Should it be something to imply these are just installation files?
     base_prefix = os.path.join(sys.prefix, 'src')
 else:
     ## FIXME: this isn't a very good default
-    base_prefix = os.getcwd()
+    base_prefix = os.path.join(os.getcwd(), 'build')
 
 pypi_url = "http://pypi.python.org/simple"
 
@@ -81,8 +83,10 @@ def main(args=None):
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
-    level = Logger.level_for_integer(3-level)
-    logger = Logger([(level, sys.stdout)])
+    level = poacheggs.Logger.level_for_integer(3-level)
+    logger = poacheggs.Logger([(level, sys.stdout)])
+    ## FIXME: this is hacky :(
+    poacheggs.logger = logger
 
     index_urls = [options.index_url] + options.extra_index_urls
     finder = PackageFinder(
@@ -95,6 +99,11 @@ def main(args=None):
     requirement_set.install()
 
 class PackageFinder(object):
+    """This finds packages.
+
+    This is meant to match easy_install's technique for looking for
+    packages, by reading pages and looking for appropriate links
+    """
 
     def __init__(self, find_links, index_urls):
         self.find_links = find_links
@@ -117,8 +126,11 @@ class PackageFinder(object):
             try:
                 page = self._get_page(location)
             except urllib2.HTTPError, e:
-                ## FIXME: better warning:
-                logger.warn('Could not fetch URL %s: %s (for requirement %s)' % (location, e, req))
+                if e.code == 404:
+                    log_meth = logger.info
+                else:
+                    log_meth = logger.warn
+                log_meth('Could not fetch URL %s: %s (for requirement %s)' % (location, e, req))
                 continue
             found_versions.extend(self._package_versions(self._parse_links(page), req.name.lower()))
         if not found_versions:
@@ -143,24 +155,36 @@ class PackageFinder(object):
         return applicable_versions[0][0]
 
     _egg_fragment_re = re.compile(r'#egg=([^&]*)')
-    _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-]+)$', re.I)
+    _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-]+)', re.I)
+    _py_version_re = re.compile(r'-py([123]\.[0-9])$')
 
     def _package_versions(self, links, search_name):
         for link in links:
             if '#egg' in link:
                 egg_info = self._egg_fragment_re.search(link).group(1)
             else:
-                egg_info = posixpath.basename(link.rstrip('/'))
+                egg_info = posixpath.splitext(posixpath.basename(link.rstrip('/')))[0]
+                if egg_info.endswith('.tar'):
+                    # Special double-extension case:
+                    egg_info = egg_info[:-4]
             match = self._egg_info_re.search(egg_info)
             if not match:
-                logger.info('Could not parse version from link: %s' % link)
+                logger.debug('Could not parse version from link: %s' % link)
                 continue
             name = match.group(1).lower()
             if name != search_name:
                 continue
-            yield (pkg_resources.parse_version(match.group(2)),
+            version = match.group(2)
+            match = self._py_version_re.search(version)
+            if match:
+                version = version[:match.start()]
+                py_version = match.group(1)
+                if py_version != sys.version[:3]:
+                    logger.debug('Skipping %s because Python version is incorrect' % link)
+                    continue
+            yield (pkg_resources.parse_version(version),
                    link,
-                   match.group(2))
+                   version)
 
     def _get_page(self, url):
         if url not in self.cached_pages:
@@ -209,7 +233,13 @@ class InstallRequirement(object):
 
     def run_egg_info(self):
         assert self.built_dir
-        subprocess.call([sys.executable, self.setup_py, 'egg_info'], cwd=self.built_dir)
+        logger.notify('Running setup.py egg_info for package %s' % self.name)
+        logger.indent += 2
+        try:
+            poacheggs.call_subprocess([sys.executable, self.setup_py, 'egg_info'], cwd=self.built_dir,
+                                      filter_stdout=self._filter_install, show_stdout=False)
+        finally:
+            logger.indent -= 2
 
     def egg_info_data(self, filename):
         assert self.built_dir
@@ -261,10 +291,28 @@ class InstallRequirement(object):
         ## FIXME: this is not a useful record:
         ## Also a bad location
         record_filename = os.path.join(os.path.dirname(os.path.dirname(self.built_dir)), 'install-record.txt')
-        subprocess.call([sys.executable, '-c',
-                         "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
-                         'install', '--single-version-externally-managed', '--record', record_filename],
-                        cwd=self.built_dir)
+        logger.notify('Running setup.py install for %s' % self.name)
+        logger.indent += 2
+        try:
+            poacheggs.call_subprocess(
+                [sys.executable, '-c',
+                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
+                 'install', '--single-version-externally-managed', '--record', record_filename],
+                cwd=self.built_dir, filter_stdout=self._filter_install, show_stdout=False)
+        finally:
+            logger.indent -= 2
+
+    def _filter_install(self, line):
+        level = poacheggs.Logger.NOTIFY
+        for regex in [r'^running .*', r'^writing .*', '^creating .*', '^[Cc]opying .*',
+                      r'^reading .*', r"^removing .*\.egg-info' \(and everything under it\)$",
+                      r'^byte-compiling ',
+                      # Not sure what this warning is, but it seems harmless:
+                      r"^warning: manifest_maker: standard file '-c' not found$"]:
+            if re.search(regex, line.strip()):
+                level = poacheggs.Logger.INFO
+                break
+        return (level, line)
 
 class RequirementSet(object):
 
@@ -284,34 +332,45 @@ class RequirementSet(object):
         reqs = self.requirements.values()
         while reqs:
             req_to_install = reqs.pop(0)
-            location = req_to_install.build_location(self.build_dir)
-            if not os.path.exists(os.path.join(location, 'setup.py')):
-                url = finder.find_requirement(req_to_install)
-                self.unpack_url(url, location)
-            req_to_install.built_dir = location
-            req_to_install.run_egg_info()
-            ## FIXME: shouldn't be globally added:
-            finder.add_dependency_links(req_to_install.dependency_links)
-            ## FIXME: add extras in here:
-            for req in req_to_install.requirements():
-                try:
-                    name = pkg_resources.Requirement.parse(req).project_name
-                except ValueError, e:
-                    ## FIXME: proper warning
-                    logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
-                    continue
-                if name in self.requirements:
-                    ## FIXME: check for conflict
-                    continue
-                reqs.append(InstallRequirement(req, req_to_install))
-            if req_to_install.name not in self.requirements:
-                self.requirements[name] = req_to_install
+            logger.notify('Downloading/unpacking %s' % req_to_install.name)
+            logger.indent += 2
+            try:
+                location = req_to_install.build_location(self.build_dir)
+                if not os.path.exists(os.path.join(location, 'setup.py')):
+                    url = finder.find_requirement(req_to_install)
+                    self.unpack_url(url, location)
+                req_to_install.built_dir = location
+                req_to_install.run_egg_info()
+                ## FIXME: shouldn't be globally added:
+                finder.add_dependency_links(req_to_install.dependency_links)
+                ## FIXME: add extras in here:
+                for req in req_to_install.requirements():
+                    try:
+                        name = pkg_resources.Requirement.parse(req).project_name
+                    except ValueError, e:
+                        ## FIXME: proper warning
+                        logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
+                        continue
+                    if name in self.requirements:
+                        ## FIXME: check for conflict
+                        continue
+                    reqs.append(InstallRequirement(req, req_to_install))
+                if req_to_install.name not in self.requirements:
+                    self.requirements[name] = req_to_install
+            finally:
+                logger.indent -= 2
+
+    _md5_re = re.compile(r'md5=([a-f0-9]+)')
 
     def unpack_url(self, url, location):
-        if '#' in url:
-            url = url.split('#')[0]
         dir = tempfile.mkdtemp()
-        resp = urllib2.urlopen(url)
+        match = self._md5_re.search(url)
+        if match:
+            md5hash = match.group(1)
+        else:
+            md5hash = None
+        print 'hash on url %s: %s' % (url, md5hash)
+        resp = urllib2.urlopen(url.split('#', 1)[0])
         content_type = resp.info()['content-type']
         filename = filename_for_url(url)
         ext = os.path.splitext(filename)
@@ -320,12 +379,22 @@ class RequirementSet(object):
             filename += ext
         temp_location = os.path.join(dir, filename)
         fp = open(temp_location, 'wb')
+        if md5hash:
+            download_hash = md5.new()
         while 1:
             chunk = resp.read(4096)
             if not chunk:
                 break
+            if md5hash:
+                download_hash.update(chunk)
             fp.write(chunk)
         fp.close()
+        if md5hash:
+            download_hash = download_hash.hexdigest()
+            if download_hash != md5hash:
+                logger.fatal("MD5 hash of the package %s (%s) doesn't match the expected hash %s!"
+                             % (url, download_hash, md5hash))
+                raise InstallationError('Bad MD5 hash for package %s' % url)
         self.unpack_file(temp_location, location, content_type, url)
         os.unlink(temp_location)
 
@@ -380,6 +449,7 @@ class RequirementSet(object):
         elif filename.lower().endswith('.tar'):
             mode = 'r'
         else:
+            logger.debug('Cannot determine compression type for file %s' % filename)
             mode = 'r:*'
         tar = tarfile.open(filename, mode)
         try:
@@ -403,7 +473,16 @@ class RequirementSet(object):
         """Export the svn repository at the url to the destination location"""
         if '#' in url:
             url = url.split('#', 1)[0]
-        subprocess.call(['svn', 'export', url, location])
+        logger.notify('Exporting svn repository %s to %s' % (url, location))
+        logger.indent += 2
+        try:
+            poacheggs.call_subprocess(['svn', 'export', url, location],
+                                      filter_stdout=self._filter_svn, show_stdout=False)
+        finally:
+            logger.indent -= 2
+
+    def _filter_svn(self, line):
+        return (poacheggs.Logger.INFO, line)
 
     def install(self):
         """Install everything in this set (after having downloaded and unpacked the packages)"""
@@ -427,6 +506,7 @@ def file_contents(filename):
 
 def filename_for_url(url):
     url = url.rstrip('/')
+    url = url.split('#', 1)[0]
     name = posixpath.basename(url)
     return name
 
