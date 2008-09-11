@@ -1,0 +1,20 @@
+News
+----
+
+svn trunk
+~~~~~~~~~
+
+* Renamed the script from ``poach-eggs`` to ``poacheggs`` (to more
+  closely match the filename ``poacheggs.py``).
+* Refactored the code internally, added tests, generally improved the
+  codebase.
+* Made the script into a single file ``poacheggs.py`` that can be run
+  without having to be installed; like ``virtualenv.py`` this makes
+  bootstrapping easier.
+* Added the ``-E`` option to run poacheggs inside a virtualenv
+  environment.
+
+0.2
+~~~
+
+* First real public release.
