@@ -51,4 +51,4 @@ Now to make sure it only runs with the cache in place::
     No local packages or download links found for INITools==0.2
     error: Could not find suitable distribution for Requirement.parse('INITools==0.2')
     ...
-    >>> None
+

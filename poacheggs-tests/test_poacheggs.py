@@ -8,10 +8,13 @@ base_path = os.path.join(here, 'test-scratch')
 
 from scripttest import TestFileEnvironment
 
+if 'PYTHONPATH' in os.environ:
+    del os.environ['PYTHONPATH']
+
 def reset_env():
     global env
     env = TestFileEnvironment(base_path, ignore_hidden=False)
-    env.run('virtualenv', env.base_path)
+    env.run('virtualenv', '--no-site-packages', env.base_path)
     env.run('mkdir', 'src')
 
 def run_poach(*args, **kw):
@@ -30,6 +33,9 @@ def write_file(filename, text):
     f.write(text)
     f.close()
 
+def get_env():
+    return env
+
 import optparse
 parser = optparse.OptionParser(usage='%prog [OPTIONS] [TEST_FILE...]')
 parser.add_option('--first', action='store_true',
@@ -43,7 +49,7 @@ def main():
     global options
     options, args = parser.parse_args()
     if not args:
-        args = ['test_basic.txt', 'test_requirements.txt', 'test_collect.txt']
+        args = ['test_basic.txt', 'test_requirements.txt', 'test_collect.txt', 'test_freeze.txt']
     optionflags = doctest.ELLIPSIS
     if options.first:
         optionflags |= doctest.REPORT_ONLY_FIRST_FAILURE
