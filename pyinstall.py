@@ -13,6 +13,7 @@ import posixpath
 import re
 import shutil
 import md5
+import urlparse
 import poacheggs
 
 class InstallationError(Exception):
@@ -62,6 +63,12 @@ parser.add_option(
     help='Unpack packages into DIR (default %s) and build from there' % base_prefix)
 
 parser.add_option(
+    '--no-install',
+    dest='no_install',
+    action='store_true',
+    help="Download and unpack all packages, but don't actually install them")
+
+parser.add_option(
     '-v', '--verbose',
     dest='verbose',
     action='count',
@@ -94,9 +101,10 @@ def main(args=None):
         index_urls=index_urls)
     requirement_set = RequirementSet(build_dir=options.build_dir)
     for name in args:
-        requirement_set.add_requirement(InstallRequirement(name, '<command-line>'))
+        requirement_set.add_requirement(InstallRequirement(name, 'command line'))
     requirement_set.install_packages(finder)
-    requirement_set.install()
+    if not options.no_install:
+        requirement_set.install()
 
 class PackageFinder(object):
     """This finds packages.
@@ -132,7 +140,7 @@ class PackageFinder(object):
                     log_meth = logger.warn
                 log_meth('Could not fetch URL %s: %s (for requirement %s)' % (location, e, req))
                 continue
-            found_versions.extend(self._package_versions(self._parse_links(page), req.name.lower()))
+            found_versions.extend(self._package_versions(self._parse_links(page, location), req.name.lower()))
         if not found_versions:
             logger.fatal('Could not find any downloads that satisfy the requirement %s' % req)
             raise DistributionNotFound('No distributions at all found for %s' % req)
@@ -197,9 +205,10 @@ class PackageFinder(object):
 
     _href_re = re.compile('href=(?:"([^"]*)"|\'([^\']*)\'|([^>\\s\\n]*))', re.I|re.S)
 
-    def _parse_links(self, page):
+    def _parse_links(self, page, page_url):
         for match in self._href_re.finditer(page):
-            yield match.group(1) or match.group(2) or match.group(3)
+            link = match.group(1) or match.group(2) or match.group(3)
+            yield urlparse.urljoin(page_url, link)
             
 
 class InstallRequirement(object):
@@ -236,10 +245,31 @@ class InstallRequirement(object):
         logger.notify('Running setup.py egg_info for package %s' % self.name)
         logger.indent += 2
         try:
-            poacheggs.call_subprocess([sys.executable, self.setup_py, 'egg_info'], cwd=self.built_dir,
-                                      filter_stdout=self._filter_install, show_stdout=False)
+            script = self._run_setup_py
+            script = script.replace('__SETUP_PY__', repr(self.setup_py))
+            script = script.replace('__PKG_NAME__', repr(self.name))
+            poacheggs.call_subprocess(
+                [sys.executable, '-c', script, 'egg_info'],
+                cwd=self.built_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
+
+    ## FIXME: This is a lame hack, entirely for PasteScript which has
+    ## a self-provided entry point that causes this awkwardness
+    _run_setup_py = """
+__file__ = __SETUP_PY__
+from setuptools.command import egg_info
+def replacement_run(self):
+    self.mkpath(self.egg_info)
+    installer = self.distribution.fetch_build_egg
+    for ep in egg_info.iter_entry_points('egg_info.writers'):
+        # require=False is the change we're making:
+        writer = ep.load(require=False)
+        writer(self, ep.name, egg_info.os.path.join(self.egg_info,ep.name))
+    self.find_sources()
+egg_info.egg_info.run = replacement_run
+execfile(__file__)
+"""
 
     def egg_info_data(self, filename):
         assert self.built_dir
@@ -332,7 +362,7 @@ class RequirementSet(object):
         reqs = self.requirements.values()
         while reqs:
             req_to_install = reqs.pop(0)
-            logger.notify('Downloading/unpacking %s' % req_to_install.name)
+            logger.notify('Downloading/unpacking %s' % req_to_install)
             logger.indent += 2
             try:
                 location = req_to_install.build_location(self.build_dir)
@@ -369,7 +399,6 @@ class RequirementSet(object):
             md5hash = match.group(1)
         else:
             md5hash = None
-        print 'hash on url %s: %s' % (url, md5hash)
         resp = urllib2.urlopen(url.split('#', 1)[0])
         content_type = resp.info()['content-type']
         filename = filename_for_url(url)
@@ -421,12 +450,16 @@ class RequirementSet(object):
         location"""
         if not os.path.exists(location):
             os.makedirs(location)
-        zipfp = open(location, 'rb')
+        zipfp = open(filename, 'rb')
         try:
-            zip = zipfile(zipfp)
+            zip = zipfile.ZipFile(zipfp)
+            leading = has_leading_dir(zip.namelist())
             for name in zip.namelist():
                 data = zip.read(name)
-                fn = os.path.join(location, strip_leading_dir(name))
+                fn = name
+                if leading:
+                    fn = split_leading_dir(name)[1]
+                fn = os.path.join(location, fn)
                 dir = os.path.dirname(fn)
                 if not os.path.exists(dir):
                     os.makedirs(dir)
@@ -453,8 +486,12 @@ class RequirementSet(object):
             mode = 'r:*'
         tar = tarfile.open(filename, mode)
         try:
+            leading = has_leading_dir([member.name for member in tar.getmembers()])
             for member in tar.getmembers():
-                path = os.path.join(location, strip_leading_dir(member.name))
+                fn = member.name
+                if leading:
+                    fn = split_leading_dir(fn)[1]
+                path = os.path.join(location, fn)
                 if member.isdir():
                     if not os.path.exists(path):
                         os.makedirs(path)
@@ -510,16 +547,33 @@ def filename_for_url(url):
     name = posixpath.basename(url)
     return name
 
-def strip_leading_dir(path):
+_no_default = ()
+def split_leading_dir(path, default=_no_default):
     path = str(path)
     path = path.lstrip('/').lstrip('\\')
     if '/' in path and (('\\' in path and path.find('/') < path.find('\\'))
                         or '\\' not in path):
-        return path.split('/', 1)[1]
+        return path.split('/', 1)
     elif '\\' in path:
-        return path.split('\\', 1)[1]
+        return path.split('\\', 1)
+    elif default is not _no_default:
+        return default, path
     else:
         assert 0, 'No directories in path: %r' % path
+
+def has_leading_dir(paths):
+    """Returns true if all the paths have the same leading path name
+    (i.e., everything is in one subdirectory in an archive)"""
+    common_prefix = None
+    for path in paths:
+        prefix, rest = split_leading_dir(path, default=None)
+        if prefix is None:
+            return False
+        elif common_prefix is None:
+            common_prefix = prefix
+        elif prefix != common_prefix:
+            return False
+    return True
 
 if __name__ == '__main__':
     main()
