@@ -12,6 +12,13 @@ import subprocess
 import posixpath
 import re
 import shutil
+from poacheggs import Logger
+
+class InstallationError(Exception):
+    """General exception during installation"""
+
+class DistributionNotFound(InstallationError):
+    """Raised when a distribution cannot be found to satisfy a requirement"""
 
 if getattr(sys, 'real_prefix', None):
     base_prefix = os.path.join(sys.prefix, 'src')
@@ -52,10 +59,31 @@ parser.add_option(
     default=base_prefix,
     help='Unpack packages into DIR (default %s) and build from there' % base_prefix)
 
+parser.add_option(
+    '-v', '--verbose',
+    dest='verbose',
+    action='count',
+    default=0,
+    help='Give more output')
+parser.add_option(
+    '-q', '--quiet',
+    dest='quiet',
+    action='count',
+    default=0,
+    help='Give less output')
+
 def main(args=None):
+    global logger
     if args is None:
         args = sys.argv[1:]
     options, args = parser.parse_args(args)
+
+    level = 1 # Notify
+    level += options.verbose
+    level -= options.quiet
+    level = Logger.level_for_integer(3-level)
+    logger = Logger([(level, sys.stdout)])
+
     index_urls = [options.index_url] + options.extra_index_urls
     finder = PackageFinder(
         find_links=options.find_links,
@@ -65,22 +93,6 @@ def main(args=None):
         requirement_set.add_requirement(InstallRequirement(name, '<command-line>'))
     requirement_set.install_packages(finder)
     requirement_set.install()
-
-def filename_for_url(url):
-    url = url.rstrip('/')
-    name = posixpath.basename(url)
-    return name
-
-def strip_leading_dir(path):
-    path = str(path)
-    path = path.lstrip('/').lstrip('\\')
-    if '/' in path and (('\\' in path and path.find('/') < path.find('\\'))
-                        or '\\' not in path):
-        return path.split('/', 1)[1]
-    elif '\\' in path:
-        return path.split('\\', 1)[1]
-    else:
-        assert 0, 'No directories in path: %r' % path
 
 class PackageFinder(object):
 
@@ -106,17 +118,32 @@ class PackageFinder(object):
                 page = self._get_page(location)
             except urllib2.HTTPError, e:
                 ## FIXME: better warning:
-                print 'Could not fetch URL %s: %s' % (location, e)
+                logger.warn('Could not fetch URL %s: %s (for requirement %s)' % (location, e, req))
                 continue
             found_versions.extend(self._package_versions(self._parse_links(page), req.name.lower()))
+        if not found_versions:
+            logger.fatal('Could not find any downloads that satisfy the requirement %s' % req)
+            raise DistributionNotFound('No distributions at all found for %s' % req)
         found_versions.sort(reverse=True)
-        ## FIXME: proper error
-        assert found_versions, (
-            "Nothing found matching requirement %s" % req)
-        return found_versions[0][1]
+        applicable_versions = []
+        for (parsed_version, link, version) in found_versions:
+            if version not in req.req:
+                logger.info("Removing link %s, version %s doesn't match %s"
+                            % (link, version, ','.join([''.join(s) for s in req.req.specs])))
+                continue
+            applicable_versions.append((link, version))
+        if len(applicable_versions) > 1:
+            logger.info('Using version %s (newest of versions: %s)' %
+                        (applicable_versions[0][1], ', '.join([version for link, version in applicable_versions])))
+        elif not applicable_versions:
+            print found_versions
+            logger.fatal('Could not find a version that satisfies the requirement %s (from versions: %s)'
+                         % (req, ', '.join([version for parsed_version, link, version in found_versions])))
+            raise DistributionNotFound('No distributions matching the version for %s' % req)
+        return applicable_versions[0][0]
 
     _egg_fragment_re = re.compile(r'#egg=([^&]*)')
-    _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-])', re.I)
+    _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-]+)$', re.I)
 
     def _package_versions(self, links, search_name):
         for link in links:
@@ -126,12 +153,14 @@ class PackageFinder(object):
                 egg_info = posixpath.basename(link.rstrip('/'))
             match = self._egg_info_re.search(egg_info)
             if not match:
+                logger.info('Could not parse version from link: %s' % link)
                 continue
             name = match.group(1).lower()
             if name != search_name:
                 continue
             yield (pkg_resources.parse_version(match.group(2)),
-                   link)
+                   link,
+                   match.group(2))
 
     def _get_page(self, url):
         if url not in self.cached_pages:
@@ -269,7 +298,7 @@ class RequirementSet(object):
                     name = pkg_resources.Requirement.parse(req).project_name
                 except ValueError, e:
                     ## FIXME: proper warning
-                    print 'Invalid requirement: %r (%s)' % (req, e)
+                    logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
                     continue
                 if name in self.requirements:
                     ## FIXME: check for conflict
@@ -297,22 +326,30 @@ class RequirementSet(object):
                 break
             fp.write(chunk)
         fp.close()
-        self.unpack_file(temp_location, location, content_type)
+        self.unpack_file(temp_location, location, content_type, url)
         os.unlink(temp_location)
 
-    def unpack_file(self, filename, location, content_type):
+    def unpack_file(self, filename, location, content_type, url):
         if content_type == 'application/zip':
             self.unzip_file(filename, location)
         elif (content_type == 'application/x-gzip'
               or tarfile.is_tarfile(filename)):
             ## FIXME: bz2, etc?
             self.untar_file(filename, location)
+        elif (content_type.startswith('text/html')
+              and is_svn_page(file_contents(filename))):
+            # We don't really care about this
+            self.svn_export(url, location)
         else:
             ## FIXME: handle?
             ## FIXME: magic signatures?
-            assert 0
+            logger.fatal('Cannot unpack file %s (downloaded from %s); cannot detect archive format'
+                         % (filename, url))
+            raise InstallationError('Cannot determine archive format of %s' % url)
 
     def unzip_file(self, filename, location):
+        """Unzip the file (zip file located at filename) to the destination
+        location"""
         if not os.path.exists(location):
             os.makedirs(location)
         zipfp = open(location, 'rb')
@@ -333,6 +370,7 @@ class RequirementSet(object):
             zipfp.close()
 
     def untar_file(self, filename, location):
+        """Untar the file (tar file located at filename) to the destination location"""
         if not os.path.exists(location):
             os.makedirs(location)
         if filename.lower().endswith('.gz'):
@@ -361,9 +399,47 @@ class RequirementSet(object):
         finally:
             tar.close()
 
+    def svn_export(self, url, location):
+        """Export the svn repository at the url to the destination location"""
+        if '#' in url:
+            url = url.split('#', 1)[0]
+        subprocess.call(['svn', 'export', url, location])
+
     def install(self):
+        """Install everything in this set (after having downloaded and unpacked the packages)"""
         for requirement in self.requirements.values():
             requirement.install()
+
+############################################################
+## Utility functions
+
+def is_svn_page(html):
+    """Returns true if the page appears to be the index page of an svn repository"""
+    return (re.search(r'<title>Revision \d+:', html)
+            and re.search(r'Powered by (?:<a[^>]*?>)?Subversion', html))
+
+def file_contents(filename):
+    fp = open(filename, 'rb')
+    try:
+        return fp.read()
+    finally:
+        fp.close()
+
+def filename_for_url(url):
+    url = url.rstrip('/')
+    name = posixpath.basename(url)
+    return name
+
+def strip_leading_dir(path):
+    path = str(path)
+    path = path.lstrip('/').lstrip('\\')
+    if '/' in path and (('\\' in path and path.find('/') < path.find('\\'))
+                        or '\\' not in path):
+        return path.split('/', 1)[1]
+    elif '\\' in path:
+        return path.split('\\', 1)[1]
+    else:
+        assert 0, 'No directories in path: %r' % path
 
 if __name__ == '__main__':
     main()
