@@ -413,7 +413,9 @@ class RequirementSet(object):
                     if name in self.requirements:
                         ## FIXME: check for conflict
                         continue
-                    reqs.append(InstallRequirement(req, req_to_install))
+                    subreq = InstallRequirement(req, req_to_install)
+                    reqs.append(subreq)
+                    self.add_requirement(subreq)
                 if req_to_install.name not in self.requirements:
                     self.requirements[name] = req_to_install
             finally:
@@ -552,8 +554,14 @@ class RequirementSet(object):
 
     def install(self):
         """Install everything in this set (after having downloaded and unpacked the packages)"""
-        for requirement in self.requirements.values():
-            requirement.install()
+        requirements = sorted(self.requirements.values(), key=lambda p: p.name.lower())
+        logger.notify('Installing collected packages: %s' % (', '.join([req.name for req in requirements])))
+        logger.indent += 2
+        try:
+            for requirement in self.requirements.values():
+                requirement.install()
+        finally:
+            logger.indent -= 2
 
 ############################################################
 ## Utility functions
