@@ -91,7 +91,7 @@ def main(args=None):
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
-    level = poacheggs.Logger.level_for_integer(3-level)
+    level = poacheggs.Logger.level_for_integer(4-level)
     logger = poacheggs.Logger([(level, sys.stdout)])
     ## FIXME: this is hacky :(
     poacheggs.logger = logger
@@ -131,17 +131,13 @@ class PackageFinder(object):
             locations = [
                 posixpath.join(url, req.name, version)] + locations
         found_versions = []
-        for location in locations:
+        for page, location in self._get_pages(locations, req):
+            logger.debug('Analyzing links from page %s' % location)
+            logger.indent += 2
             try:
-                page = self._get_page(location)
-            except urllib2.HTTPError, e:
-                if e.code == 404:
-                    log_meth = logger.info
-                else:
-                    log_meth = logger.warn
-                log_meth('Could not fetch URL %s: %s (for requirement %s)' % (location, e, req))
-                continue
-            found_versions.extend(self._package_versions(self._parse_links(page, location), req.name.lower()))
+                found_versions.extend(self._package_versions(self._parse_links(page, location), req.name.lower()))
+            finally:
+                logger.indent -= 2
         if not found_versions:
             logger.fatal('Could not find any downloads that satisfy the requirement %s' % req)
             raise DistributionNotFound('No distributions at all found for %s' % req)
@@ -163,27 +159,83 @@ class PackageFinder(object):
             raise DistributionNotFound('No distributions matching the version for %s' % req)
         return applicable_versions[0][0]
 
+    ## FIXME: these regexes are horrible hacks:
+    _homepage_re = re.compile(r'<th>\s*home\s*page', re.I)
+    _download_re = re.compile(r'<th>\s*download\s+url', re.I)
+    ## These aren't so aweful:
+    _rel_re = re.compile("""<[^>]*\srel\s*=\s*['"]?([^'">]+)[^>]*>""", re.I)
+    
+    def _get_pages(self, locations, req):
+        """Yields (page, page_url) from the given locations, skipping
+        locations that have errors, and adding download/homepage links"""
+        for location in locations:
+            page = self._get_page(location, req)
+            if page is None:
+                continue
+            yield (page, location)
+            for regex, desc in (self._homepage_re, 'homepage link'), (self._download_re, 'download page'):
+                match = regex.search(page)
+                if not match:
+                    continue
+                href_match = self._href_re.search(page, pos=match.end())
+                if not href_match:
+                    continue
+                url = href_match.group(1) or href_match.group(2) or href_match.group(3)
+                if not url:
+                    continue
+                url = urlparse.urljoin(location, url)
+                subpage = self._get_page(url, req)
+                if subpage is None:
+                    continue
+                logger.debug('Looking in %s: %s' % (desc, url))
+                yield (subpage, url)
+            for match in self._rel_re.finditer(page):
+                rel = match.group(1).lower().split()
+                if 'homepage' in rel or 'download' in rel:
+                    href_match = self._href_re.search(match.group(0))
+                    url = href_match.group(1) or href_match.group(2) or href_match.group(3)
+                    url = urlparse.urljoin(location, url)
+                    subpage = self._get_page(url, req)
+                    if subpage is None:
+                        continue
+                    logger.debug('Looking in rel link %s: %s' % (', '.join(rel), url))
+                    yield (subpage, url)
+
     _egg_fragment_re = re.compile(r'#egg=([^&]*)')
     _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-]+)', re.I)
     _py_version_re = re.compile(r'-py([123]\.[0-9])$')
 
     def _package_versions(self, links, search_name):
+        seen_links = {}
         for link in links:
+            if link in seen_links:
+                continue
+            seen_links[link] = None
             if '#egg' in link:
                 egg_info = self._egg_fragment_re.search(link).group(1)
             else:
-                egg_info = posixpath.splitext(posixpath.basename(link.rstrip('/')))[0]
+                path = urlparse.urlsplit(link)[2]
+                egg_info, ext = posixpath.splitext(posixpath.basename(path.rstrip('/')))
+                if not ext:
+                    logger.debug('Skipping link %s; not a file' % link)
+                    continue
                 if egg_info.endswith('.tar'):
                     # Special double-extension case:
                     egg_info = egg_info[:-4]
+                    ext = '.tar' + ext
+                if ext not in ('.tar.gz', '.tar.bz2', '.tar', '.tgz', '.zip'):
+                    logger.debug('Skipping link %s; unknown archive format: %s' % (link, ext))
+                    continue
             match = self._egg_info_re.search(egg_info)
             if not match:
                 logger.debug('Could not parse version from link: %s' % link)
                 continue
-            name = match.group(1).lower()
-            if name != search_name:
+            if match.group(0).lower().startswith(search_name):
+                name = search_name
+                version = match.group(0)[len(search_name):].lstrip('-')
+            else:
+                logger.debug('Skipping link %s; wrong project name (not %s)' % (link, search_name))
                 continue
-            version = match.group(2)
             match = self._py_version_re.search(version)
             if match:
                 version = version[:match.start()]
@@ -191,14 +243,23 @@ class PackageFinder(object):
                 if py_version != sys.version[:3]:
                     logger.debug('Skipping %s because Python version is incorrect' % link)
                     continue
+            logger.debug('Found link %s, version: %s' % (link, version))
             yield (pkg_resources.parse_version(version),
                    link,
                    version)
 
-    def _get_page(self, url):
+    def _get_page(self, url, req):
         if url not in self.cached_pages:
-            resp = urllib2.urlopen(url)
-            page = resp.read()
+            try:
+                resp = urllib2.urlopen(url)
+                page = resp.read()
+            except urllib2.HTTPError, e:
+                if e.code == 404:
+                    log_meth = logger.info
+                else:
+                    log_meth = logger.warn
+                log_meth('Could not fetch URL %s: %s (for requirement %s)' % (url, e, req))
+                return None
             self.cached_pages[url] = page
         else:
             page = self.cached_pages[url]
@@ -251,7 +312,8 @@ class InstallRequirement(object):
             script = script.replace('__PKG_NAME__', repr(self.name))
             poacheggs.call_subprocess(
                 [sys.executable, '-c', script, 'egg_info', '--egg-base', '.'],
-                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
+                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False,
+                command_level=poacheggs.Logger.VERBOSE_DEBUG)
         finally:
             logger.indent -= 2
 
@@ -532,6 +594,8 @@ class RequirementSet(object):
                         os.makedirs(path)
                 else:
                     fp = tar.extractfile(member)
+                    if not os.path.exists(os.path.dirname(path)):
+                        os.makedirs(os.path.dirname(path))
                     destfp = open(path, 'wb')
                     try:
                         shutil.copyfileobj(fp, destfp)

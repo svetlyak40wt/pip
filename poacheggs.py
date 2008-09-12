@@ -75,7 +75,7 @@ def main(initial_args):
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
-    level = Logger.level_for_integer(3-level)
+    level = Logger.level_for_integer(4-level)
     logger = Logger([(level, sys.stdout)])
     if not options.src:
         for i in 'VIRTUAL_ENV', 'WORKING_ENV':
@@ -653,7 +653,7 @@ class InstallItem(object):
             logger.notify('Checking out %s to %s' % (svn_location, dir))
         call_subprocess(['svn', 'checkout', svn_location, dir])
 
-    def svn_checkout(self, dir):
+    def x_svn_checkout(self, dir):
         """Check out this package into the given `dir` directory."""
         href = self.source_location
         command = ['svn', 'checkout']
@@ -1033,6 +1033,7 @@ class Logger(object):
     levels, to avoid some redundancy of displayed information.
     """
 
+    VERBOSE_DEBUG = logging.DEBUG-1
     DEBUG = logging.DEBUG
     INFO = logging.INFO
     NOTIFY = (logging.INFO+logging.WARN)/2
@@ -1040,7 +1041,7 @@ class Logger(object):
     ERROR = logging.ERROR
     FATAL = logging.FATAL
 
-    LEVELS = [DEBUG, INFO, NOTIFY, WARN, ERROR, FATAL]
+    LEVELS = [VERBOSE_DEBUG, DEBUG, INFO, NOTIFY, WARN, ERROR, FATAL]
 
     def __init__(self, consumers):
         self.consumers = consumers
@@ -1252,7 +1253,8 @@ def join_filename(base, sub, only_req_uri=False):
 
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
-                    raise_on_returncode=True):
+                    raise_on_returncode=True,
+                    command_level=Logger.DEBUG):
     cmd_parts = []
     for part in cmd:
         if ' ' in part or '\n' in part or '"' in part or "'" in part:
@@ -1263,7 +1265,7 @@ def call_subprocess(cmd, show_stdout=True,
         stdout = None
     else:
         stdout = subprocess.PIPE
-    logger.debug("Running command %s" % cmd_desc)
+    logger.log(command_level, "Running command %s" % cmd_desc)
     try:
         proc = subprocess.Popen(
             cmd, stderr=subprocess.STDOUT, stdin=None, stdout=stdout,
