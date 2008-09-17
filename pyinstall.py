@@ -4,6 +4,7 @@ import os
 import optparse
 import pkg_resources
 import urllib2
+import urllib
 import mimetypes
 import zipfile
 import tarfile
@@ -12,10 +13,20 @@ import subprocess
 import posixpath
 import re
 import shutil
-import md5
+try:
+    from hashlib import md5
+except ImportError:
+    import md5
 import urlparse
 from email.FeedParser import FeedParser
 import poacheggs
+import traceback
+from cStringIO import StringIO
+import socket
+from Queue import Queue
+from Queue import Empty as QueueEmpty
+import threading
+import httplib
 
 class InstallationError(Exception):
     """General exception during installation"""
@@ -62,6 +73,13 @@ parser.add_option(
     metavar='DIR',
     default=base_prefix,
     help='Unpack packages into DIR (default %s) and build from there' % base_prefix)
+parser.add_option(
+    '--timeout',
+    metavar='SECONDS',
+    dest='timeout',
+    type='int',
+    default=10,
+    help='Set the socket timeout (default 10 seconds)')
 
 parser.add_option(
     '--no-install',
@@ -95,6 +113,7 @@ def main(args=None):
     logger = poacheggs.Logger([(level, sys.stdout)])
     ## FIXME: this is hacky :(
     poacheggs.logger = logger
+    socket.setdefaulttimeout(options.timeout or None)
 
     index_urls = [options.index_url] + options.extra_index_urls
     finder = PackageFinder(
@@ -102,10 +121,28 @@ def main(args=None):
         index_urls=index_urls)
     requirement_set = RequirementSet(build_dir=options.build_dir)
     for name in args:
-        requirement_set.add_requirement(InstallRequirement(name, 'command line'))
-    requirement_set.install_packages(finder)
-    if not options.no_install:
-        requirement_set.install()
+        requirement_set.add_requirement(InstallRequirement(name, None))
+    try:
+        requirement_set.install_packages(finder)
+        if not options.no_install:
+            requirement_set.install()
+            logger.notify('Successfully installed %s' % requirement_set)
+        else:
+            logger.notify('Successfully downloaded %s' % requirement_set)
+    except InstallationError, e:
+        logger.fatal(str(e))
+        logger.info('Exception information:\n%s' % format_exc())
+        sys.exit(1)
+    except:
+        logger.fatal('Exception:\n%s' % format_exc())
+        sys.exit(2)
+
+def format_exc(exc_info=None):
+    if exc_info is None:
+        exc_info = sys.exc_info()
+    out = StringIO()
+    traceback.print_exception(*exc_info, **dict(file=out))
+    return out.getvalue()
 
 class PackageFinder(object):
     """This finds packages.
@@ -114,28 +151,44 @@ class PackageFinder(object):
     packages, by reading pages and looking for appropriate links
     """
 
+    failure_limit = 3
+
     def __init__(self, find_links, index_urls):
         self.find_links = find_links
         self.index_urls = index_urls
         self.dependency_links = []
-        self.cached_pages = {}
+        self.cache = PageCache()
     
     def add_dependency_links(self, links):
+        ## FIXME: this shouldn't be global list this, it should only
+        ## apply to requirements of the package that specifies the
+        ## dependency_links value
         self.dependency_links.extend(links)
 
     def find_requirement(self, req):
+        url_name = req.url_name
+        # Check that we have the url_name correctly spelled:
+        main_index_url = Link(posixpath.join(self.index_urls[0], url_name))
+        # This will also cache the page, so it's okay that we get it again later:
+        page = self._get_page(main_index_url, req)
+        if page is None:
+            url_name = self._find_url_name(Link(self.index_urls[0]), url_name, req)
         locations = [
-            posixpath.join(url, req.name)
+            posixpath.join(url, url_name)
             for url in self.index_urls] + self.find_links + self.dependency_links
         for version in req.absolute_versions:
             locations = [
-                posixpath.join(url, req.name, version)] + locations
+                posixpath.join(url, url_name, version)] + locations
+        locations = [Link(url) for url in locations]
+        logger.debug('URLs to search for versions for %s:' % req)
+        for location in locations:
+            logger.debug('* %s' % location)
         found_versions = []
-        for page, location in self._get_pages(locations, req):
-            logger.debug('Analyzing links from page %s' % location)
+        for page in self._get_pages(locations, req):
+            logger.debug('Analyzing links from page %s' % page.url)
             logger.indent += 2
             try:
-                found_versions.extend(self._package_versions(self._parse_links(page, location), req.name.lower()))
+                found_versions.extend(self._package_versions(page.links, req.name.lower()))
             finally:
                 logger.indent -= 2
         if not found_versions:
@@ -153,53 +206,65 @@ class PackageFinder(object):
             logger.info('Using version %s (newest of versions: %s)' %
                         (applicable_versions[0][1], ', '.join([version for link, version in applicable_versions])))
         elif not applicable_versions:
-            print found_versions
             logger.fatal('Could not find a version that satisfies the requirement %s (from versions: %s)'
                          % (req, ', '.join([version for parsed_version, link, version in found_versions])))
             raise DistributionNotFound('No distributions matching the version for %s' % req)
         return applicable_versions[0][0]
 
-    ## FIXME: these regexes are horrible hacks:
-    _homepage_re = re.compile(r'<th>\s*home\s*page', re.I)
-    _download_re = re.compile(r'<th>\s*download\s+url', re.I)
-    ## These aren't so aweful:
-    _rel_re = re.compile("""<[^>]*\srel\s*=\s*['"]?([^'">]+)[^>]*>""", re.I)
-    
+    def _find_url_name(self, index_url, url_name, req):
+        """Finds the true URL name of a package, when the given name isn't quite correct.
+        This is usually used to implement case-insensitivity."""
+        if not index_url.url.endswith('/'):
+            # Vaguely part of the PyPI API... weird but true.
+            ## FIXME: bad to modify this?
+            index_url.url += '/'
+        page = self._get_page(index_url, req)
+        if page is None:
+            logger.fatal('Cannot fetch index base URL %s' % index_url)
+            raise DistributionNotFound('Cannot find requirement %s, nor fetch index URL %s' % (req, index_url))
+        norm_name = normalize_name(req.url_name)
+        for link in page.links:
+            base = posixpath.basename(link.path.rstrip('/'))
+            if norm_name == normalize_name(base):
+                logger.notify('Real name of requirement %s is %s' % (url_name, base))
+                return base
+        raise DistributionNotFound('Cannot find requirement %s' % req)
+
     def _get_pages(self, locations, req):
         """Yields (page, page_url) from the given locations, skipping
         locations that have errors, and adding download/homepage links"""
+        pending_queue = Queue()
         for location in locations:
+            pending_queue.put(location)
+        done = []
+        seen = set()
+        threads = []
+        for i in range(min(10, len(locations))):
+            t = threading.Thread(target=self._get_queued_page, args=(req, pending_queue, done, seen))
+            t.setDaemon(True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+        return done
+
+    _log_lock = threading.Lock()
+
+    def _get_queued_page(self, req, pending_queue, done, seen):
+        while 1:
+            try:
+                location = pending_queue.get(False)
+            except QueueEmpty:
+                return
+            if location in seen:
+                continue
+            seen.add(location)
             page = self._get_page(location, req)
             if page is None:
                 continue
-            yield (page, location)
-            for regex, desc in (self._homepage_re, 'homepage link'), (self._download_re, 'download page'):
-                match = regex.search(page)
-                if not match:
-                    continue
-                href_match = self._href_re.search(page, pos=match.end())
-                if not href_match:
-                    continue
-                url = href_match.group(1) or href_match.group(2) or href_match.group(3)
-                if not url:
-                    continue
-                url = urlparse.urljoin(location, url)
-                subpage = self._get_page(url, req)
-                if subpage is None:
-                    continue
-                logger.debug('Looking in %s: %s' % (desc, url))
-                yield (subpage, url)
-            for match in self._rel_re.finditer(page):
-                rel = match.group(1).lower().split()
-                if 'homepage' in rel or 'download' in rel:
-                    href_match = self._href_re.search(match.group(0))
-                    url = href_match.group(1) or href_match.group(2) or href_match.group(3)
-                    url = urlparse.urljoin(location, url)
-                    subpage = self._get_page(url, req)
-                    if subpage is None:
-                        continue
-                    logger.debug('Looking in rel link %s: %s' % (', '.join(rel), url))
-                    yield (subpage, url)
+            done.append(page)
+            for link in page.rel_links():
+                pending_queue.put(link)
 
     _egg_fragment_re = re.compile(r'#egg=([^&]*)')
     _egg_info_re = re.compile(r'([a-z0-9_.]+)-([a-z0-9_.-]+)', re.I)
@@ -208,14 +273,14 @@ class PackageFinder(object):
     def _package_versions(self, links, search_name):
         seen_links = {}
         for link in links:
-            if link in seen_links:
+            if link.url in seen_links:
                 continue
-            seen_links[link] = None
-            if '#egg' in link:
-                egg_info = self._egg_fragment_re.search(link).group(1)
+            seen_links[link.url] = None
+            if link.egg_fragment:
+                egg_info = link.egg_fragment
             else:
-                path = urlparse.urlsplit(link)[2]
-                egg_info, ext = posixpath.splitext(posixpath.basename(path.rstrip('/')))
+                path = link.path
+                egg_info, ext = link.splitext()
                 if not ext:
                     logger.debug('Skipping link %s; not a file' % link)
                     continue
@@ -226,14 +291,8 @@ class PackageFinder(object):
                 if ext not in ('.tar.gz', '.tar.bz2', '.tar', '.tgz', '.zip'):
                     logger.debug('Skipping link %s; unknown archive format: %s' % (link, ext))
                     continue
-            match = self._egg_info_re.search(egg_info)
-            if not match:
-                logger.debug('Could not parse version from link: %s' % link)
-                continue
-            if match.group(0).lower().startswith(search_name):
-                name = search_name
-                version = match.group(0)[len(search_name):].lstrip('-')
-            else:
+            version = self._egg_info_matches(egg_info, search_name, link)
+            if version is None:
                 logger.debug('Skipping link %s; wrong project name (not %s)' % (link, search_name))
                 continue
             match = self._py_version_re.search(version)
@@ -248,47 +307,51 @@ class PackageFinder(object):
                    link,
                    version)
 
-    def _get_page(self, url, req):
-        if url not in self.cached_pages:
-            try:
-                resp = urllib2.urlopen(url)
-                page = resp.read()
-            except urllib2.HTTPError, e:
-                if e.code == 404:
-                    log_meth = logger.info
-                else:
-                    log_meth = logger.warn
-                log_meth('Could not fetch URL %s: %s (for requirement %s)' % (url, e, req))
-                return None
-            self.cached_pages[url] = page
+    def _egg_info_matches(self, egg_info, search_name, link):
+        match = self._egg_info_re.search(egg_info)
+        if not match:
+            logger.debug('Could not parse version from link: %s' % link)
+            return None
+        name = match.group(0).lower()
+        # To match the "safe" name that pkg_resources creates:
+        name = name.replace('_', '-')
+        if name.startswith(search_name.lower()):
+            return match.group(0)[len(search_name):].lstrip('-')
         else:
-            page = self.cached_pages[url]
-        return page
+            return None
 
-    _href_re = re.compile('href=(?:"([^"]*)"|\'([^\']*)\'|([^>\\s\\n]*))', re.I|re.S)
+    def _get_page(self, link, req):
+        return HTMLPage.get_page(link, req, cache=self.cache)
 
-    def _parse_links(self, page, page_url):
-        for match in self._href_re.finditer(page):
-            link = match.group(1) or match.group(2) or match.group(3)
-            yield urlparse.urljoin(page_url, link)
-            
 
 class InstallRequirement(object):
 
-    def __init__(self, req, comes_from, source_dir=None, installed=False):
+    def __init__(self, req, comes_from, source_dir=None):
         if isinstance(req, basestring):
             req = pkg_resources.Requirement.parse(req)
         self.req = req
         self.comes_from = comes_from
         self.source_dir = source_dir
-        self.installed = installed
+        self._egg_info_path = None
 
     def __str__(self):
         s = str(self.req)
         if self.comes_from:
-            s += ' (from %s)' % self.comes_from
-        if self.installed:
-            s += ' installed'
+            if isinstance(self.comes_from, basestring):
+                comes_from = self.comes_from
+            else:
+                comes_from = self.comes_from.from_path()
+            s += ' (from %s)' % comes_from
+        return s
+
+    def from_path(self):
+        s = str(self.req)
+        if self.comes_from:
+            if isinstance(self.comes_from, basestring):
+                comes_from = self.comes_from
+            else:
+                comes_from = self.comes_from.from_path()
+            s += '->' + comes_from
         return s
 
     def build_location(self, build_dir):
@@ -297,6 +360,10 @@ class InstallRequirement(object):
     @property
     def name(self):
         return self.req.project_name
+
+    @property
+    def url_name(self):
+        return urllib.quote(self.req.unsafe_name)
 
     @property
     def setup_py(self):
@@ -310,10 +377,16 @@ class InstallRequirement(object):
             script = self._run_setup_py
             script = script.replace('__SETUP_PY__', repr(self.setup_py))
             script = script.replace('__PKG_NAME__', repr(self.name))
+            # We can't put the .egg-info files at the root, because then the source code will be mistaken
+            # for an installed egg, causing problems
+            egg_info_dir = os.path.join(self.source_dir, 'pyinstall-egg-info')
+            if not os.path.exists(egg_info_dir):
+                os.makedirs(egg_info_dir)
             poacheggs.call_subprocess(
-                [sys.executable, '-c', script, 'egg_info', '--egg-base', '.'],
+                [sys.executable, '-c', script, 'egg_info', '--egg-base', 'pyinstall-egg-info'],
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False,
-                command_level=poacheggs.Logger.VERBOSE_DEBUG)
+                command_level=poacheggs.Logger.VERBOSE_DEBUG,
+                command_desc='python setup.py egg_info')
         finally:
             logger.indent -= 2
 
@@ -336,13 +409,21 @@ execfile(__file__)
 
     def egg_info_data(self, filename):
         assert self.source_dir
-        fn = os.path.join(self.source_dir, self.name + '.egg-info', filename)
-        if not os.path.exists(fn):
+        filename = self.egg_info_path(filename)
+        if not os.path.exists(filename):
             return None
-        fp = open(fn, 'r')
+        fp = open(filename, 'r')
         data = fp.read()
         fp.close()
         return data
+
+    def egg_info_path(self, filename):
+        if self._egg_info_path is None:
+            base = os.path.join(self.source_dir, 'pyinstall-egg-info')
+            filenames = os.listdir(base)
+            assert len(filenames) == 1, "Unexpected files/directories in %s: %s" % (base, filenames)
+            self._egg_info_path = os.path.join(base, filenames[0])
+        return os.path.join(self._egg_info_path, filename)
 
     def egg_info_lines(self, filename):
         data = self.egg_info_data(filename)
@@ -358,7 +439,10 @@ execfile(__file__)
 
     def pkg_info(self):
         p = FeedParser()
-        p.feed(self.egg_info_data('PKG-INFO') or '')
+        data = self.egg_info_data('PKG-INFO')
+        if not data:
+            logger.warn('No PKG-INFO file found in %s' % display_path(self.egg_info_path('PKG-INFO')))
+        p.feed(data or '')
         return p.close()
 
     @property
@@ -399,25 +483,29 @@ execfile(__file__)
         if version not in self.req:
             logger.fatal(
                 'Source in %s has the version %s, which does not match the requirement %s'
-                % (self.source_dir, version, self))
+                % (display_path(self.source_dir), version, self))
             raise InstallationError(
                 'Source in %s has version %s that conflicts with %s' 
-                % (self.source_dir, version, self))
+                % (display_path(self.source_dir), version, self))
         else:
             logger.debug('Source in %s has version %s, which satisfies requirement %s'
-                         % (self.source_dir, version, self))
+                         % (display_path(self.source_dir), version, self))
 
     def install(self):
         ## FIXME: this is not a useful record:
         ## Also a bad location
         record_filename = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'install-record.txt')
+        ## FIXME: I'm not sure if this is a reasonable location; probably not
+        ## but we can't put it in the default location, as that is a virtualenv symlink that isn't writable
+        header_dir = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'lib', 'include')
         logger.notify('Running setup.py install for %s' % self.name)
         logger.indent += 2
         try:
             poacheggs.call_subprocess(
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
-                 'install', '--single-version-externally-managed', '--record', record_filename],
+                 'install', '--single-version-externally-managed', '--record', record_filename,
+                 '--install-headers', header_dir],
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
@@ -440,6 +528,12 @@ class RequirementSet(object):
         self.build_dir = build_dir
         self.requirements = {}
 
+    def __str__(self):
+        reqs = [req for req in self.requirements.values()
+                if not req.comes_from]
+        reqs.sort(key=lambda req: req.name.lower())
+        return ' '.join([str(req.req) for req in reqs])
+
     def add_requirement(self, install_req):
         name = install_req.name
         if name in self.requirements:
@@ -458,7 +552,14 @@ class RequirementSet(object):
                 location = req_to_install.build_location(self.build_dir)
                 if not os.path.exists(os.path.join(location, 'setup.py')):
                     url = finder.find_requirement(req_to_install)
-                    self.unpack_url(url, location)
+                    try:
+                        self.unpack_url(url, location)
+                    except urllib2.HTTPError, e:
+                        logger.fatal('Could not install requirement %s because of error %s'
+                                     % (req_to_install, e))
+                        raise InstallationError(
+                            'Could not install requirement %s because of HTTP error %s for URL %s'
+                            % (req_to_install, e, url))
                 req_to_install.source_dir = location
                 req_to_install.run_egg_info()
                 req_to_install.assert_source_matches_version()
@@ -483,63 +584,91 @@ class RequirementSet(object):
             finally:
                 logger.indent -= 2
 
-    _md5_re = re.compile(r'md5=([a-f0-9]+)')
-
-    def unpack_url(self, url, location):
+    def unpack_url(self, link, location):
+        if link.scheme == 'svn' or link.scheme == 'svn+ssh':
+            self.svn_export(link, location)
+            return
         dir = tempfile.mkdtemp()
-        match = self._md5_re.search(url)
-        if match:
-            md5hash = match.group(1)
-        else:
-            md5hash = None
+        md5_hash = link.md5_hash
         try:
-            resp = urllib2.urlopen(url.split('#', 1)[0])
+            resp = urllib2.urlopen(link.url.split('#', 1)[0])
         except urllib2.HTTPError, e:
-            logger.fatal("HTTP error %s while getting %s" % (e.code, url))
+            logger.fatal("HTTP error %s while getting %s" % (e.code, link))
+            raise
+        except IOError, e:
+            # Typically an FTP error
+            logger.fatal("Error %s while getting %s" % (e, link))
             raise
         content_type = resp.info()['content-type']
-        filename = filename_for_url(url)
+        filename = link.filename
         ext = os.path.splitext(filename)
         if not ext:
             ext = mimetypes.guess_extension(content_type)
             filename += ext
         temp_location = os.path.join(dir, filename)
         fp = open(temp_location, 'wb')
-        if md5hash:
+        if md5_hash:
             download_hash = md5.new()
-        while 1:
-            chunk = resp.read(4096)
-            if not chunk:
-                break
-            if md5hash:
-                download_hash.update(chunk)
-            fp.write(chunk)
-        fp.close()
-        if md5hash:
+        try:
+            total_length = int(resp.info()['content-length'])
+        except (ValueError, KeyError):
+            total_length = 0
+        downloaded = 0
+        show_progress = total_length > 40*1000 or not total_length
+        show_url = link.show_url
+        try:
+            if show_progress:
+                ## FIXME: the URL can get really long in this message:
+                if total_length:
+                    logger.start_progress('Downloading %s (%s): ' % (show_url, format_size(total_length)))
+                else:
+                    logger.start_progress('Downloading %s (unknown size): ' % show_url)
+            else:
+                logger.notify('Downloading %s' % show_url)
+            while 1:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                downloaded += len(chunk)
+                if show_progress:
+                    if not total_length:
+                        logger.show_progress('%s' % format_size(downloaded))
+                    else:
+                        logger.show_progress('%3i%%  %s' % (100*downloaded/total_length, format_size(downloaded)))
+                if md5_hash:
+                    download_hash.update(chunk)
+                fp.write(chunk)
+            fp.close()
+        finally:
+            if show_progress:
+                logger.end_progress('%s downloaded' % format_size(downloaded))
+        if md5_hash:
             download_hash = download_hash.hexdigest()
-            if download_hash != md5hash:
+            if download_hash != md5_hash:
                 logger.fatal("MD5 hash of the package %s (%s) doesn't match the expected hash %s!"
-                             % (url, download_hash, md5hash))
-                raise InstallationError('Bad MD5 hash for package %s' % url)
-        self.unpack_file(temp_location, location, content_type, url)
+                             % (link, download_hash, md5_hash))
+                raise InstallationError('Bad MD5 hash for package %s' % link)
+        self.unpack_file(temp_location, location, content_type, link)
         os.unlink(temp_location)
 
-    def unpack_file(self, filename, location, content_type, url):
-        if content_type == 'application/zip':
+    def unpack_file(self, filename, location, content_type, link):
+        if (content_type == 'application/zip'
+            or filename.endswith('.zip')):
             self.unzip_file(filename, location)
         elif (content_type == 'application/x-gzip'
-              or tarfile.is_tarfile(filename)):
-            ## FIXME: bz2, etc?
+              or tarfile.is_tarfile(filename)
+              ## FIXME: not sure if splitext will ever produce .tar.gz:
+              or os.path.splitext(filename)[1].lower() in ('.tar', '.tar.gz', '.tar.bz2', '.tgz')):
             self.untar_file(filename, location)
         elif (content_type.startswith('text/html')
               and is_svn_page(file_contents(filename))):
             # We don't really care about this
-            self.svn_export(url, location)
+            self.svn_export(link.url, location)
         else:
             ## FIXME: handle?
             ## FIXME: magic signatures?
-            logger.fatal('Cannot unpack file %s (downloaded from %s); cannot detect archive format'
-                         % (filename, url))
+            logger.fatal('Cannot unpack file %s (downloaded from %s, content-type: %s); cannot detect archive format'
+                         % (filename, url, content_type))
             raise InstallationError('Cannot determine archive format of %s' % url)
 
     def unzip_file(self, filename, location):
@@ -560,11 +689,16 @@ class RequirementSet(object):
                 dir = os.path.dirname(fn)
                 if not os.path.exists(dir):
                     os.makedirs(dir)
-                fp = open(fn, 'wb')
-                try:
-                    fp.write(data)
-                finally:
-                    fp.close()
+                if fn.endswith('/'):
+                    # A directory
+                    if not os.path.exists(fn):
+                        os.makedirs(fn)
+                else:
+                    fp = open(fn, 'wb')
+                    try:
+                        fp.write(data)
+                    finally:
+                        fp.close()
         finally:
             zipfp.close()
 
@@ -572,14 +706,14 @@ class RequirementSet(object):
         """Untar the file (tar file located at filename) to the destination location"""
         if not os.path.exists(location):
             os.makedirs(location)
-        if filename.lower().endswith('.gz'):
+        if filename.lower().endswith('.gz') or filename.lower().endswith('.tgz'):
             mode = 'r:gz'
         elif filename.lower().endswith('.bz2'):
             mode = 'r:bz2'
         elif filename.lower().endswith('.tar'):
             mode = 'r'
         else:
-            logger.debug('Cannot determine compression type for file %s' % filename)
+            logger.warn('Cannot determine compression type for file %s' % filename)
             mode = 'r:*'
         tar = tarfile.open(filename, mode)
         try:
@@ -631,13 +765,242 @@ class RequirementSet(object):
         finally:
             logger.indent -= 2
 
+class HTMLPage(object):
+    """Represents one page, along with its URL"""
+
+    ## FIXME: these regexes are horrible hacks:
+    _homepage_re = re.compile(r'<th>\s*home\s*page', re.I)
+    _download_re = re.compile(r'<th>\s*download\s+url', re.I)
+    ## These aren't so aweful:
+    _rel_re = re.compile("""<[^>]*\srel\s*=\s*['"]?([^'">]+)[^>]*>""", re.I)
+    _href_re = re.compile('href=(?:"([^"]*)"|\'([^\']*)\'|([^>\\s\\n]*))', re.I|re.S)
+
+    def __init__(self, content, url, headers=None):
+        self.content = content
+        self.url = url
+        self.headers = headers
+
+    def __str__(self):
+        return self.url
+
+    @classmethod
+    def get_page(cls, link, req, cache=None, skip_archives=True):
+        url = link.url
+        url = url.split('#', 1)[0]
+        if cache.too_many_failures(url):
+            return None
+        if url.lower().startswith('svn'):
+            logger.debug('Cannot look at svn URL %s' % link)
+            return None
+        if cache is not None:
+            inst = cache.get_page(url)
+            if inst is not None:
+                return inst
+        if skip_archives:
+            if cache is not None:
+                if cache.is_archive(url):
+                    return None
+            filename = link.filename
+            for bad_ext in ['.tar', '.tar.gz', '.tar.bz2', '.tgz', '.zip']:
+                if filename.endswith(bad_ext):
+                    content_type = cls._get_content_type(url)
+                    if content_type.lower().startswith('text/html'):
+                        break
+                    else:
+                        logger.debug('Skipping page %s because of Content-Type: %s' % (link, content_type))
+                        if cache is not None:
+                            cache.set_is_archive(url)
+                        return None
+        try:
+            logger.debug('Getting page %s' % url)
+            resp = urllib2.urlopen(url)
+            real_url = resp.geturl()
+            headers = resp.info()
+            inst = cls(resp.read(), real_url, headers)
+        except urllib2.HTTPError, e:
+            if e.code == 404:
+                ## FIXME: notify?
+                log_meth = logger.info
+                level = 2
+            else:
+                log_meth = logger.warn
+                level = 1
+            log_meth('Could not fetch URL %s: %s (for requirement %s)' % (link, e, req))
+            if cache is not None:
+                cache.add_page_failure(url, level)
+            return None
+        except urllib2.URLError, e:
+            logger.warn('URL %s is invalid: %s' % (link, e))
+            if cache is not None:
+                cache.add_page_failure(url, 2)
+            return None
+        if cache is not None:
+            cache.add_page([url, real_url], inst)
+        return inst
+
+    @staticmethod
+    def _get_content_type(url):
+        """Get the Content-Type of the given url, using a HEAD request"""
+        scheme, netloc, path, query, fragment = urlparse.urlsplit(url)
+        if scheme == 'http':
+            ConnClass = httplib.HTTPConnection
+        elif scheme == 'https':
+            ConnClass = httplib.HTTPSConnection
+        else:
+            ## FIXME: some warning or something?
+            ## assertion error?
+            return ''
+        if query:
+            path += '?' + query
+        conn = ConnClass(netloc)
+        try:
+            conn.request('HEAD', path, headers={'Host': netloc})
+            resp = conn.getresponse()
+            if resp.status != 200:
+                ## FIXME: doesn't handle redirects
+                return ''
+            return resp.getheader('Content-Type') or ''
+        finally:
+            conn.close()
+
+    @property
+    def links(self):
+        """Yields all links in the page"""
+        for match in self._href_re.finditer(self.content):
+            url = match.group(1) or match.group(2) or match.group(3)
+            yield Link(urlparse.urljoin(self.url, url), self)
+
+    def rel_links(self):
+        for url in self.explicit_rel_links():
+            yield url
+        for url in self.scraped_rel_links():
+            yield url
+
+    def explicit_rel_links(self, rels=('homepage', 'download')):
+        """Yields all links with the given relations"""
+        for match in self._rel_re.finditer(self.content):
+            found_rels = match.group(1).lower().split()
+            for rel in rels:
+                if rel in found_rels:
+                    break
+            else:
+                continue
+            match = self._href_re.search(match.group(0))
+            if not match:
+                continue
+            url = match.group(1) or match.group(2) or match.group(3)
+            yield Link(urlparse.urljoin(self.url, url), self)
+
+    def scraped_rel_links(self):
+        for regex in (self._homepage_re, self._download_re):
+            match = regex.search(self.content)
+            if not match:
+                continue
+            href_match = self._href_re.search(self.content, pos=match.end())
+            if not href_match:
+                continue
+            url = match.group(1) or match.group(2) or match.group(3)
+            if not url:
+                continue
+            url = urlparse.urljoin(self.url, url)
+            yield Link(url, self)
+
+class PageCache(object):
+    """Cache of HTML pages"""
+
+    failure_limit = 3
+
+    def __init__(self):
+        self._failures = {}
+        self._pages = {}
+        self._archives = {}
+
+    def too_many_failures(self, url):
+        return self._failures.get(url, 0) >= self.failure_limit
+
+    def get_page(self, url):
+        return self._pages.get(url)
+
+    def is_archive(self, url):
+        return self._archives.get(url, False)
+
+    def set_is_archive(self, url, value=True):
+        self._archives[url] = value
+
+    def add_page_failure(self, url, level):
+        self._failures[url] = self._failures.get(url, 0)+level
+
+    def add_page(self, urls, page):
+        for url in urls:
+            self._pages[url] = page
+
+class Link(object):
+
+    def __init__(self, url, comes_from=None):
+        self.url = url
+        self.comes_from = comes_from
+    
+    def __str__(self):
+        if self.comes_from:
+            return '%s (from %s)' % (self.url, self.comes_from)
+        else:
+            return self.url
+
+    @property
+    def filename(self):
+        url = self.url
+        url = url.split('#', 1)[0]
+        url = url.split('?', 1)[0]
+        url = url.rstrip('/')
+        name = posixpath.basename(url)
+        assert name, (
+            'URL %r produced no filename' % url)
+        return name
+
+    @property
+    def scheme(self):
+        return urlparse.urlsplit(self.url)[0]
+
+    @property
+    def path(self):
+        return urlparse.urlsplit(self.url)[2]
+
+    def splitext(self):
+        base, ext = posixpath.splitext(posixpath.basename(self.path.rstrip('/')))
+        if base.endswith('.tar'):
+            ext = '.tar' + ext
+            base = base[:-4]
+        return base, ext
+
+    _egg_fragment_re = re.compile(r'#egg=([^&]*)')
+
+    @property
+    def egg_fragment(self):
+        match = self._egg_fragment_re.search(self.url)
+        if not match:
+            return None
+        return match.group(1)
+
+    _md5_re = re.compile(r'md5=([a-f0-9]+)')
+
+    @property
+    def md5_hash(self):
+        match = self._md5_re.search(self.url)
+        if match:
+            return match.group(1)
+        return None
+
+    @property
+    def show_url(self):
+        return posixpath.basename(self.url.split('#', 1)[0].split('?', 1)[0])
+
 ############################################################
 ## Utility functions
 
 def is_svn_page(html):
     """Returns true if the page appears to be the index page of an svn repository"""
-    return (re.search(r'<title>Revision \d+:', html)
-            and re.search(r'Powered by (?:<a[^>]*?>)?Subversion', html))
+    return (re.search(r'<title>[^<]*Revision \d+:', html)
+            and re.search(r'Powered by (?:<a[^>]*?>)?Subversion', html, re.I))
 
 def file_contents(filename):
     fp = open(filename, 'rb')
@@ -645,12 +1008,6 @@ def file_contents(filename):
         return fp.read()
     finally:
         fp.close()
-
-def filename_for_url(url):
-    url = url.rstrip('/')
-    url = url.split('#', 1)[0]
-    name = posixpath.basename(url)
-    return name
 
 _no_default = ()
 def split_leading_dir(path, default=_no_default):
@@ -679,6 +1036,29 @@ def has_leading_dir(paths):
         elif prefix != common_prefix:
             return False
     return True
+
+def format_size(bytes):
+    if bytes > 1000*1000:
+        return '%.1fMb' % (bytes/1000.0/1000)
+    elif bytes > 10*1000:
+        return '%iKb' % (bytes/1000)
+    elif bytes > 1000:
+        return '%.1fKb' % (bytes/1000.0)
+    else:
+        return '%ibytes' % bytes
+
+_normalize_re = re.compile(r'[^a-z]', re.I)
+
+def normalize_name(name):
+    return _normalize_re.sub('-', name.lower())
+
+def display_path(path):
+    """Gives the display value for a given path, making it relative to cwd
+    if possible."""
+    path = os.path.normcase(os.path.abspath(path))
+    if path.startswith(os.getcwd() + os.path.sep):
+        path = '.' + path[len(os.getcwd()):]
+    return path
 
 if __name__ == '__main__':
     main()
