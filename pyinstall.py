@@ -501,14 +501,22 @@ execfile(__file__)
         logger.notify('Running setup.py install for %s' % self.name)
         logger.indent += 2
         try:
-            poacheggs.call_subprocess(
-                [sys.executable, '-c',
-                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
-                 'install', '--single-version-externally-managed', '--record', record_filename,
-                 '--install-headers', header_dir],
-                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
-        finally:
-            logger.indent -= 2
+            try:
+                poacheggs.call_subprocess(
+                    [sys.executable, '-c',
+                     "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
+                     'install', '--single-version-externally-managed', '--record', record_filename,
+                     '--install-headers', header_dir],
+                    cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
+            finally:
+                logger.indent -= 2
+        except:
+            raise
+        else:
+            if os.path.exists(self.delete_marker_filename):
+                logger.info('Removing source in %s' % self.source_dir)
+                shutil.rmtree(self.source_dir)
+                self.source_dir = None
 
     def _filter_install(self, line):
         level = poacheggs.Logger.NOTIFY
@@ -521,6 +529,18 @@ execfile(__file__)
                 level = poacheggs.Logger.INFO
                 break
         return (level, line)
+
+    @property
+    def delete_marker_filename(self):
+        return os.path.join(self.source_dir, 'pyinstall-delete-this-directory.txt')
+
+DELETE_MARKER_MESSAGE = '''\
+This file is placed here by pyinstall to indicate the source was put
+here by pyinstall.
+
+Once this package is successfully installed this source code will be
+deleted (unless you remove this file).
+'''
 
 class RequirementSet(object):
 
@@ -563,6 +583,9 @@ class RequirementSet(object):
                 req_to_install.source_dir = location
                 req_to_install.run_egg_info()
                 req_to_install.assert_source_matches_version()
+                f = open(req_to_install.delete_marker_filename, 'w')
+                f.write(DELETE_MARKER_MESSAGE)
+                f.close()
                 ## FIXME: shouldn't be globally added:
                 finder.add_dependency_links(req_to_install.dependency_links)
                 ## FIXME: add extras in here:
