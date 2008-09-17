@@ -1097,6 +1097,7 @@ class Logger(object):
         else:
             self.in_progress_hanging = False
         self.in_progress = msg
+        self.last_message = None
 
     def end_progress(self, msg='done.'):
         assert self.in_progress, (
@@ -1107,17 +1108,29 @@ class Logger(object):
                 sys.stdout.write('...' + self.in_progress + msg + '\n')
                 sys.stdout.flush()
             else:
+                # These erase any messages shown with show_progress (besides .'s)
+                logger.show_progress('')
+                logger.show_progress('')
                 sys.stdout.write(msg + '\n')
                 sys.stdout.flush()
         self.in_progress = None
         self.in_progress_hanging = False
 
-    def show_progress(self):
+    def show_progress(self, message=None):
         """If we are in a progress scope, and no log messages have been
         shown, write out another '.'"""
         if self.in_progress_hanging:
-            sys.stdout.write('.')
-            sys.stdout.flush()
+            if message is None:
+                sys.stdout.write('.')
+                sys.stdout.flush()
+            else:
+                if self.last_message:
+                    padding = ' ' * max(0, len(self.last_message)-len(message))
+                else:
+                    padding = ''
+                sys.stdout.write('\r%s%s%s' % (self.in_progress, message, padding))
+                sys.stdout.flush()
+                self.last_message = message
 
     def stdout_level_matches(self, level):
         """Returns true if a message at this level will go to stdout"""
@@ -1254,25 +1267,26 @@ def join_filename(base, sub, only_req_uri=False):
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
                     raise_on_returncode=True,
-                    command_level=Logger.DEBUG):
-    cmd_parts = []
-    for part in cmd:
-        if ' ' in part or '\n' in part or '"' in part or "'" in part:
-            part = '"%s"' % part.replace('"', '\\"')
-        cmd_parts.append(part)
-    cmd_desc = ' '.join(cmd_parts)
+                    command_level=Logger.DEBUG, command_desc=None):
+    if command_desc is None:
+        cmd_parts = []
+        for part in cmd:
+            if ' ' in part or '\n' in part or '"' in part or "'" in part:
+                part = '"%s"' % part.replace('"', '\\"')
+            cmd_parts.append(part)
+        command_desc = ' '.join(cmd_parts)
     if show_stdout:
         stdout = None
     else:
         stdout = subprocess.PIPE
-    logger.log(command_level, "Running command %s" % cmd_desc)
+    logger.log(command_level, "Running command %s" % command_desc)
     try:
         proc = subprocess.Popen(
             cmd, stderr=subprocess.STDOUT, stdin=None, stdout=stdout,
             cwd=cwd)
     except Exception, e:
         logger.fatal(
-            "Error %s while executing command %s" % (e, cmd_desc))
+            "Error %s while executing command %s" % (e, command_desc))
         raise
     all_output = []
     if stdout is not None:
@@ -1299,15 +1313,15 @@ def call_subprocess(cmd, show_stdout=True,
     if proc.returncode:
         if raise_on_returncode:
             if all_output:
-                logger.notify('Complete output from command %s:' % cmd_desc)
+                logger.notify('Complete output from command %s:' % command_desc)
                 logger.notify('\n'.join(all_output) + '\n----------------------------------------')
             raise CommandError(
                 "Command %s failed with error code %s"
-                % (cmd_desc, proc.returncode))
+                % (command_desc, proc.returncode))
         else:
             logger.warn(
                 "Command %s had error code %s"
-                % (cmd_desc, proc.returncode))
+                % (command_desc, proc.returncode))
     if stdout is not None:
         return ''.join(all_output)
 
