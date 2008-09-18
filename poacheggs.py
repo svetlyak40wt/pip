@@ -1312,7 +1312,7 @@ def call_subprocess(cmd, show_stdout=True,
                 logger.info(line)
     else:
         returned_stdout, returned_stderr = proc.communicate()
-        all_output = [returned_stdout]
+        all_output = [returned_stdout or '']
     proc.wait()
     if proc.returncode:
         if raise_on_returncode:

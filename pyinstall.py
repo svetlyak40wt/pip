@@ -686,7 +686,8 @@ execfile(__file__)
             poacheggs.call_subprocess(
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py),
-                 'develop'])
+                 'develop'], cwd=self.source_dir, filter_stdout=self._filter_install,
+                show_stdout=False)
         finally:
             logger.indent -= 2
 
