@@ -1267,7 +1267,8 @@ def join_filename(base, sub, only_req_uri=False):
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
                     raise_on_returncode=True,
-                    command_level=Logger.DEBUG, command_desc=None):
+                    command_level=Logger.DEBUG, command_desc=None,
+                    extra_environ=None):
     if command_desc is None:
         cmd_parts = []
         for part in cmd:
@@ -1280,10 +1281,13 @@ def call_subprocess(cmd, show_stdout=True,
     else:
         stdout = subprocess.PIPE
     logger.log(command_level, "Running command %s" % command_desc)
+    env = os.environ.copy()
+    if extra_environ:
+        env.update(extra_environ)
     try:
         proc = subprocess.Popen(
             cmd, stderr=subprocess.STDOUT, stdin=None, stdout=stdout,
-            cwd=cwd)
+            cwd=cwd, env=env)
     except Exception, e:
         logger.fatal(
             "Error %s while executing command %s" % (e, command_desc))
@@ -1296,7 +1300,7 @@ def call_subprocess(cmd, show_stdout=True,
             if not line:
                 break
             line = line.rstrip()
-            all_output.append(line)
+            all_output.append(line + '\n')
             if filter_stdout:
                 level = filter_stdout(line)
                 if isinstance(level, tuple):
