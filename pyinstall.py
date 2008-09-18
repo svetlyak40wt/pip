@@ -82,6 +82,16 @@ parser.add_option(
     help='Set the socket timeout (default 10 seconds)')
 
 parser.add_option(
+    '-U', '--upgrade',
+    dest='upgrade',
+    action='store_true',
+    help='Upgrade all packages to the newest available version')
+parser.add_option(
+    '-I', '--ignore-installed',
+    dest='ignore_installed',
+    action='store_true',
+    help='Ignore the installed packages (reinstalling instead)')
+parser.add_option(
     '--no-install',
     dest='no_install',
     action='store_true',
@@ -119,11 +129,13 @@ def main(args=None):
     finder = PackageFinder(
         find_links=options.find_links,
         index_urls=index_urls)
-    requirement_set = RequirementSet(build_dir=options.build_dir)
+    requirement_set = RequirementSet(build_dir=options.build_dir,
+                                     upgrade=options.upgrade,
+                                     ignore_installed=options.ignore_installed)
     for name in args:
         requirement_set.add_requirement(InstallRequirement(name, None))
     try:
-        requirement_set.install_packages(finder)
+        requirement_set.install_files(finder)
         if not options.no_install:
             requirement_set.install()
             logger.notify('Successfully installed %s' % requirement_set)
@@ -165,7 +177,7 @@ class PackageFinder(object):
         ## dependency_links value
         self.dependency_links.extend(links)
 
-    def find_requirement(self, req):
+    def find_requirement(self, req, upgrade):
         url_name = req.url_name
         # Check that we have the url_name correctly spelled:
         main_index_url = Link(posixpath.join(self.index_urls[0], url_name))
@@ -194,6 +206,8 @@ class PackageFinder(object):
         if not found_versions:
             logger.fatal('Could not find any downloads that satisfy the requirement %s' % req)
             raise DistributionNotFound('No distributions at all found for %s' % req)
+        if req.satisfied_by is not None:
+            found_versions.append((req.satisfied_by.parsed_version, Inf, req.satisfied_by.version))
         found_versions.sort(reverse=True)
         applicable_versions = []
         for (parsed_version, link, version) in found_versions:
@@ -202,13 +216,27 @@ class PackageFinder(object):
                             % (link, version, ','.join([''.join(s) for s in req.req.specs])))
                 continue
             applicable_versions.append((link, version))
-        if len(applicable_versions) > 1:
-            logger.info('Using version %s (newest of versions: %s)' %
-                        (applicable_versions[0][1], ', '.join([version for link, version in applicable_versions])))
-        elif not applicable_versions:
+        existing_applicable = bool([link for link, version in applicable_versions if link is Inf])
+        if not upgrade and existing_applicable:
+            if applicable_versions[0][1] is Inf:
+                logger.info('Existing installed version (%s) is most up-to-date and satisfies requirement'
+                            % req.satisfied_by.version)
+            else:
+                logger.info('Existing installed version (%s) satisfies requirement (most up-to-date version is %s)'
+                            % (req.satisfied_by.version, application_versions[0][2]))
+            return None
+        if not applicable_versions:
             logger.fatal('Could not find a version that satisfies the requirement %s (from versions: %s)'
                          % (req, ', '.join([version for parsed_version, link, version in found_versions])))
             raise DistributionNotFound('No distributions matching the version for %s' % req)
+        if applicable_versions[0][0] is Inf:
+            # We have an existing version, and its the best version
+            logger.info('Installed version (%s) is most up-to-date (past versions: %s)'
+                        % (req.satisfied_by.version, ', '.join([version for link, version in applicable_versions[1:]]) or 'none'))
+            return None
+        if len(applicable_versions) > 1:
+            logger.info('Using version %s (newest of versions: %s)' %
+                        (applicable_versions[0][1], ', '.join([version for link, version in applicable_versions])))
         return applicable_versions[0][0]
 
     def _find_url_name(self, index_url, url_name, req):
@@ -333,9 +361,14 @@ class InstallRequirement(object):
         self.comes_from = comes_from
         self.source_dir = source_dir
         self._egg_info_path = None
+        # This holds the pkg_resources.Distribution object if this requirement
+        # is already available:
+        self.satisfied_by = None
 
     def __str__(self):
         s = str(self.req)
+        if self.satisfied_by is not None:
+            s += ' in %s' % display_path(self.satisfied_by.location)
         if self.comes_from:
             if isinstance(self.comes_from, basestring):
                 comes_from = self.comes_from
@@ -408,6 +441,10 @@ execfile(__file__)
 """
 
     def egg_info_data(self, filename):
+        if self.satisfied_by is not None:
+            if not self.satisfied_by.has_metadata(filename):
+                return None
+            return self.satisfied_by.get_metadata(filename)
         assert self.source_dir
         filename = self.egg_info_path(filename)
         if not os.path.exists(filename):
@@ -530,8 +567,18 @@ execfile(__file__)
                 break
         return (level, line)
 
+    def check_if_exists(self):
+        """Checks if this requirement is satisfied by something already installed"""
+        try:
+            dist = pkg_resources.get_distribution(self.req)
+        except pkg_resources.DistributionNotFound:
+            return False
+        self.satisfied_by = dist
+        return True
+
     @property
     def delete_marker_filename(self):
+        assert self.source_dir
         return os.path.join(self.source_dir, 'pyinstall-delete-this-directory.txt')
 
 DELETE_MARKER_MESSAGE = '''\
@@ -544,8 +591,10 @@ deleted (unless you remove this file).
 
 class RequirementSet(object):
 
-    def __init__(self, build_dir):
+    def __init__(self, build_dir, upgrade=False, ignore_installed=False):
         self.build_dir = build_dir
+        self.upgrade = upgrade
+        self.ignore_installed = ignore_installed
         self.requirements = {}
 
     def __str__(self):
@@ -562,30 +611,47 @@ class RequirementSet(object):
                 % (install_req, self.requirements[name], name))
         self.requirements[name] = install_req
 
-    def install_packages(self, finder):
+    def install_files(self, finder):
         reqs = self.requirements.values()
         while reqs:
             req_to_install = reqs.pop(0)
-            logger.notify('Downloading/unpacking %s' % req_to_install)
+            install = True
+            if not self.ignore_installed:
+                if req_to_install.check_if_exists():
+                    if not self.upgrade:
+                        # If we are upgrading, we still need to check the version
+                        install = False
+            if req_to_install.satisfied_by is not None:
+                logger.notify('Requirement already satisfied: %s' % req_to_install)
+            else:
+                logger.notify('Downloading/unpacking %s' % req_to_install)
             logger.indent += 2
             try:
-                location = req_to_install.build_location(self.build_dir)
-                if not os.path.exists(os.path.join(location, 'setup.py')):
-                    url = finder.find_requirement(req_to_install)
-                    try:
-                        self.unpack_url(url, location)
-                    except urllib2.HTTPError, e:
-                        logger.fatal('Could not install requirement %s because of error %s'
-                                     % (req_to_install, e))
-                        raise InstallationError(
-                            'Could not install requirement %s because of HTTP error %s for URL %s'
-                            % (req_to_install, e, url))
-                req_to_install.source_dir = location
-                req_to_install.run_egg_info()
-                req_to_install.assert_source_matches_version()
-                f = open(req_to_install.delete_marker_filename, 'w')
-                f.write(DELETE_MARKER_MESSAGE)
-                f.close()
+                if install:
+                    location = req_to_install.build_location(self.build_dir)
+                    ## FIXME: is the existance of the checkout good enough to use it?  I'm don't think so.
+                    unpack = True
+                    if not os.path.exists(os.path.join(location, 'setup.py')):
+                        ## FIXME: this won't upgrade when there's an existing package unpacked in `location`
+                        url = finder.find_requirement(req_to_install, upgrade=self.upgrade)
+                        if url:
+                            try:
+                                self.unpack_url(url, location)
+                            except urllib2.HTTPError, e:
+                                logger.fatal('Could not install requirement %s because of error %s'
+                                             % (req_to_install, e))
+                                raise InstallationError(
+                                    'Could not install requirement %s because of HTTP error %s for URL %s'
+                                    % (req_to_install, e, url))
+                        else:
+                            unpack = False
+                    if unpack:
+                        req_to_install.source_dir = location
+                        req_to_install.run_egg_info()
+                        req_to_install.assert_source_matches_version()
+                        f = open(req_to_install.delete_marker_filename, 'w')
+                        f.write(DELETE_MARKER_MESSAGE)
+                        f.close()
                 ## FIXME: shouldn't be globally added:
                 finder.add_dependency_links(req_to_install.dependency_links)
                 ## FIXME: add extras in here:
@@ -784,6 +850,9 @@ class RequirementSet(object):
         logger.indent += 2
         try:
             for requirement in self.requirements.values():
+                if requirement.satisfied_by is not None:
+                    # Already installed
+                    continue
                 requirement.install()
         finally:
             logger.indent -= 2
@@ -969,6 +1038,9 @@ class Link(object):
         else:
             return self.url
 
+    def __repr__(self):
+        return '<Link %s>' % self
+
     @property
     def filename(self):
         url = self.url
@@ -1082,6 +1154,17 @@ def display_path(path):
     if path.startswith(os.getcwd() + os.path.sep):
         path = '.' + path[len(os.getcwd()):]
     return path
+
+class _Inf(object):
+    """I am bigger than everything!"""
+    def __cmp__(self, a):
+        if self is a:
+            return 0
+        return 1
+    def __repr__(self):
+        return 'Inf'
+Inf = _Inf()
+del _Inf
 
 if __name__ == '__main__':
     main()
