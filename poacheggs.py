@@ -1091,7 +1091,7 @@ class Logger(object):
             "Tried to start_progress(%r) while in_progress %r"
             % (msg, self.in_progress))
         if self.level_matches(self.NOTIFY, self._stdout_level()):
-            sys.stdout.write(msg)
+            sys.stdout.write(' '*self.indent + msg)
             sys.stdout.flush()
             self.in_progress_hanging = True
         else:
@@ -1128,7 +1128,7 @@ class Logger(object):
                     padding = ' ' * max(0, len(self.last_message)-len(message))
                 else:
                     padding = ''
-                sys.stdout.write('\r%s%s%s' % (self.in_progress, message, padding))
+                sys.stdout.write('\r%s%s%s%s' % (' '*self.indent, self.in_progress, message, padding))
                 sys.stdout.flush()
                 self.last_message = message
 
