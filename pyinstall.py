@@ -36,15 +36,27 @@ class DistributionNotFound(InstallationError):
 
 if getattr(sys, 'real_prefix', None):
     ## FIXME: is src/ really good?  Should it be something to imply these are just installation files?
-    base_prefix = os.path.join(sys.prefix, 'src')
+    base_prefix = os.path.join(sys.prefix, 'build')
+    base_src_prefix = os.path.join(sys.prefix, 'src')
 else:
     ## FIXME: this isn't a very good default
     base_prefix = os.path.join(os.getcwd(), 'build')
+    base_prefix = os.path.join(os.getcwd(), 'src')
 
 pypi_url = "http://pypi.python.org/simple"
 
 parser = optparse.OptionParser(
     usage='%prog [OPTIONS] PACKAGE_NAMES')
+
+parser.add_option(
+    '-e', '--editable',
+    dest='editables',
+    action='append',
+    default=[],
+    metavar='svn+REPOS_URL[@REV]#egg=PACKAGE',
+    help='Install a package directly from a checkout.  Source will be checked '
+    'out into src/PACKAGE (lower-case) and installed in-place (using '
+    'setup.py develop).  This option may be provided multiple times.')
 
 parser.add_option(
     '-f', '--find-links',
@@ -73,6 +85,12 @@ parser.add_option(
     metavar='DIR',
     default=base_prefix,
     help='Unpack packages into DIR (default %s) and build from there' % base_prefix)
+parser.add_option(
+    '--src', '--source',
+    dest='src_dir',
+    metavar='DIR',
+    default=base_src_prefix,
+    help='Check out --editable packages into DIR (default %s)' % base_src_prefix)
 parser.add_option(
     '--timeout',
     metavar='SECONDS',
@@ -130,10 +148,16 @@ def main(args=None):
         find_links=options.find_links,
         index_urls=index_urls)
     requirement_set = RequirementSet(build_dir=options.build_dir,
+                                     src_dir=options.src_dir,
                                      upgrade=options.upgrade,
                                      ignore_installed=options.ignore_installed)
     for name in args:
-        requirement_set.add_requirement(InstallRequirement(name, None))
+        requirement_set.add_requirement(
+            InstallRequirement(name, None))
+    for name in options.editables:
+        name, checkout_url = parse_editable(name)
+        requirement_set.add_requirement(
+            InstallRequirement(name, None, editable=True, checkout_url=checkout_url))
     try:
         requirement_set.install_files(finder)
         if not options.no_install:
@@ -354,12 +378,19 @@ class PackageFinder(object):
 
 class InstallRequirement(object):
 
-    def __init__(self, req, comes_from, source_dir=None):
+    def __init__(self, req, comes_from, source_dir=None, editable=False,
+                 checkout_url=None):
         if isinstance(req, basestring):
             req = pkg_resources.Requirement.parse(req)
         self.req = req
         self.comes_from = comes_from
         self.source_dir = source_dir
+        self.editable = editable
+        if editable:
+            assert checkout_url, "You must give checkout_url with editable=True"
+        else:
+            assert not checkout_url, "You cannot give checkout_url without editable=True"
+        self.checkout_url = checkout_url
         self._egg_info_path = None
         # This holds the pkg_resources.Distribution object if this requirement
         # is already available:
@@ -369,6 +400,8 @@ class InstallRequirement(object):
         s = str(self.req)
         if self.satisfied_by is not None:
             s += ' in %s' % display_path(self.satisfied_by.location)
+        if self.editable:
+            s += ' checkout from %s' % self.checkout_url
         if self.comes_from:
             if isinstance(self.comes_from, basestring):
                 comes_from = self.comes_from
@@ -388,7 +421,11 @@ class InstallRequirement(object):
         return s
 
     def build_location(self, build_dir):
-        return os.path.join(build_dir, self.name)
+        if self.editable:
+            name = self.name.lower()
+        else:
+            name = self.name
+        return os.path.join(build_dir, name)
 
     @property
     def name(self):
@@ -412,11 +449,15 @@ class InstallRequirement(object):
             script = script.replace('__PKG_NAME__', repr(self.name))
             # We can't put the .egg-info files at the root, because then the source code will be mistaken
             # for an installed egg, causing problems
-            egg_info_dir = os.path.join(self.source_dir, 'pyinstall-egg-info')
-            if not os.path.exists(egg_info_dir):
-                os.makedirs(egg_info_dir)
+            if self.editable:
+                egg_base_option = []
+            else:
+                egg_info_dir = os.path.join(self.source_dir, 'pyinstall-egg-info')
+                if not os.path.exists(egg_info_dir):
+                    os.makedirs(egg_info_dir)
+                egg_base_option = ['--egg-base', 'pyinstall-egg-info']
             poacheggs.call_subprocess(
-                [sys.executable, '-c', script, 'egg_info', '--egg-base', 'pyinstall-egg-info'],
+                [sys.executable, '-c', script, 'egg_info'] + egg_base_option,
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False,
                 command_level=poacheggs.Logger.VERBOSE_DEBUG,
                 command_desc='python setup.py egg_info')
@@ -456,9 +497,14 @@ execfile(__file__)
 
     def egg_info_path(self, filename):
         if self._egg_info_path is None:
-            base = os.path.join(self.source_dir, 'pyinstall-egg-info')
+            if self.editable:
+                base = self.source_dir
+            else:
+                base = os.path.join(self.source_dir, 'pyinstall-egg-info')
             filenames = os.listdir(base)
-            assert len(filenames) == 1, "Unexpected files/directories in %s: %s" % (base, filenames)
+            if self.editable:
+                filenames = [f for f in filenames if f.endswith('.egg-info')]
+            assert len(filenames) == 1, "Unexpected files/directories in %s: %s" % (base, ' '.join(filenames))
             self._egg_info_path = os.path.join(base, filenames[0])
         return os.path.join(self._egg_info_path, filename)
 
@@ -528,10 +574,87 @@ execfile(__file__)
             logger.debug('Source in %s has version %s, which satisfies requirement %s'
                          % (display_path(self.source_dir), version, self))
 
+    def update_editable(self):
+        assert self.editable and self.checkout_url
+        assert self.source_dir
+        vc_type, url = self.checkout_url.split('+', 1)
+        vc_type = vc_type.lower()
+        if vc_type == 'svn':
+            self.checkout_svn()
+        else:
+            assert 0, (
+                'Unexpected version control type (in %s): %s' 
+                % (self.checkout_url, vc_type))
+
+    def checkout_svn(self):
+        url = self.checkout_url.split('+', 1)[1]
+        url = url.split('#', 1)[0]
+        if '@' in url:
+            url, rev = url.split('@', 1)
+        else:
+            rev = None
+        if rev:
+            rev_options = ['-r', rev]
+            rev_display = ' (to revision %s)' % rev
+        else:
+            rev_options = []
+            rev_display = ''
+        dest = self.source_dir
+        checkout = True
+        if os.path.exists(os.path.join(self.source_dir, '.svn')):
+            existing_url = self._get_svn_url(self.source_dir)
+            checkout = False
+            if existing_url == url:
+                logger.info('Checkout in %s exists, and has correct URL (%s)'
+                            % (display_path(self.source_dir), url))
+                logger.notify('Updating checkout %s%s' % (display_path(self.source_dir), rev_display))
+                poacheggs.call_subprocess(
+                    ['svn', 'update'] + rev_options + [self.source_dir])
+            else:
+                logger.warn('svn checkout in %s exists with URL %s' % (display_path(self.source_dir), existing_url))
+                logger.warn('The plan is to install the svn repository %s' % url)
+                response = ask('What to do?  (s)witch, (i)gnore, (w)ipe, (b)ackup', ('s', 'i', 'w', 'b'))
+                if response == 's':
+                    logger.notify('Switching checkout %s to %s%s'
+                                  % (display_path(self.source_dir), url, rev_display))
+                    poacheggs.call_subprocess(
+                        ['svn', 'switch'] + rev_options + [url, self.source_dir])
+                elif response == 'i':
+                    # do nothing
+                    pass
+                elif response == 'w':
+                    logger.warn('Deleting %s' % display_path(self.source_dir))
+                    shutil.rmtree(self.source_dir)
+                    checkout = True
+                elif response == 'b':
+                    dest_dir = backup_dir(self.source_dir)
+                    logger.warn('Backing up %s to %s' % display_path(self.source_dir, dest_dir))
+                    shutil.move(self.source_dir, dest_dir)
+                    checkout = True
+        if checkout:
+            logger.notify('Checking out %s%s to %s' % (url, rev_display, display_path(self.source_dir)))
+            poacheggs.call_subprocess(
+                ['svn', 'checkout', '-q'] + rev_options + [url, self.source_dir])
+
+    _svn_url_re = re.compile(r'URL: (.+)')
+
+    def _get_svn_url(self, dir):
+        output = poacheggs.call_subprocess(['svn', 'info', dir], show_stdout=False,
+                                           extra_environ={'LANG': 'C'})
+        match = self._svn_url_re.search(output)
+        if not match:
+            logger.warn('Cannot determine URL of svn checkout %s' % display_path(dir))
+            logger.info('Output that cannot be parsed: \n%s' % output)
+            return 'unknown'
+        return match.group(1).strip()
+
     def install(self):
+        if self.editable:
+            self.install_editable()
+            return
         ## FIXME: this is not a useful record:
         ## Also a bad location
-        record_filename = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'install-record.txt')
+        record_filename = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'install-record-%s.txt' % self.name)
         ## FIXME: I'm not sure if this is a reasonable location; probably not
         ## but we can't put it in the default location, as that is a virtualenv symlink that isn't writable
         header_dir = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'lib', 'include')
@@ -545,15 +668,27 @@ execfile(__file__)
                      'install', '--single-version-externally-managed', '--record', record_filename,
                      '--install-headers', header_dir],
                     cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
-            finally:
-                logger.indent -= 2
-        except:
-            raise
-        else:
-            if os.path.exists(self.delete_marker_filename):
-                logger.info('Removing source in %s' % self.source_dir)
-                shutil.rmtree(self.source_dir)
-                self.source_dir = None
+            except:
+                raise
+            else:
+                if os.path.exists(self.delete_marker_filename):
+                    logger.info('Removing source in %s' % self.source_dir)
+                    shutil.rmtree(self.source_dir)
+                    self.source_dir = None
+        finally:
+            logger.indent -= 2
+
+    def install_editable(self):
+        logger.notify('Running setup.py develop for %s' % self.name)
+        logger.indent += 2
+        try:
+            ## FIXME: should we do --install-headers here too?
+            poacheggs.call_subprocess(
+                [sys.executable, '-c',
+                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py),
+                 'develop'])
+        finally:
+            logger.indent -= 2
 
     def _filter_install(self, line):
         level = poacheggs.Logger.NOTIFY
@@ -591,8 +726,9 @@ deleted (unless you remove this file).
 
 class RequirementSet(object):
 
-    def __init__(self, build_dir, upgrade=False, ignore_installed=False):
+    def __init__(self, build_dir, src_dir, upgrade=False, ignore_installed=False):
         self.build_dir = build_dir
+        self.src_dir = src_dir
         self.upgrade = upgrade
         self.ignore_installed = ignore_installed
         self.requirements = {}
@@ -616,18 +752,25 @@ class RequirementSet(object):
         while reqs:
             req_to_install = reqs.pop(0)
             install = True
-            if not self.ignore_installed:
+            if not self.ignore_installed and not req_to_install.editable:
                 if req_to_install.check_if_exists():
                     if not self.upgrade:
                         # If we are upgrading, we still need to check the version
                         install = False
             if req_to_install.satisfied_by is not None:
                 logger.notify('Requirement already satisfied: %s' % req_to_install)
+            elif req_to_install.editable:
+                logger.notify('Checking out %s' % req_to_install)
             else:
                 logger.notify('Downloading/unpacking %s' % req_to_install)
             logger.indent += 2
             try:
-                if install:
+                if req_to_install.editable:
+                    location = req_to_install.build_location(self.src_dir)
+                    req_to_install.source_dir = location
+                    req_to_install.update_editable()
+                    req_to_install.run_egg_info()
+                elif install:
                     location = req_to_install.build_location(self.build_dir)
                     ## FIXME: is the existance of the checkout good enough to use it?  I'm don't think so.
                     unpack = True
@@ -1154,6 +1297,52 @@ def display_path(path):
     if path.startswith(os.getcwd() + os.path.sep):
         path = '.' + path[len(os.getcwd()):]
     return path
+
+def parse_editable(editable_req):
+    """Parses svn+http://blahblah@rev#egg=Foobar into a requirement
+    (Foobar) and a URL"""
+    match = re.search(r'(?:#|#.*?&)egg=([^&]*)', editable_req)
+    if not match or not match.group(1):
+        raise InstallationError(
+            '--editable=%s is not the right format; it must have #egg=Package'
+            % editable_req)
+    req = match.group(1)
+    match = re.search(r'^(.*?)(?:-dev|-\d.*)', req)
+    if match:
+        # Strip off -dev, -0.2, etc.
+        req = match.group(1)
+    url = editable_req
+    if url.lower().startswith('svn:'):
+        url = 'svn+' + url
+    if '+' not in url:
+        raise InstallationError(
+            '--editable=%s should be formatted with svn+URL' % editable_req)
+    vc_type = url.split('+', 1)[0].lower()
+    if vc_type != 'svn':
+        raise InstallationError(
+            'For --editable=%s only svn (svn+URL) is currently supported' % editable_req)
+    return req, url
+
+def backup_dir(dir):
+    """Figure out the name of a directory to back up the given dir to
+    (adding .bak, .bak2, etc)"""
+    n = 1
+    ext = '.bak'
+    while os.path.exists(dir + ext):
+        n += 1
+        ext = '.bak%s' % n
+    return dir + ext
+
+def ask(message, options):
+    """Ask the message interactively, with the given possible responses"""
+    while 1:
+        response = raw_input(message)
+        response = response.strip().lower()
+        if response not in options:
+            print 'Your response (%r) was not one of the expected responses: %s' % (
+                response, ', '.join(options))
+        else:
+            return response
 
 class _Inf(object):
     """I am bigger than everything!"""
