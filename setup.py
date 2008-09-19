@@ -25,10 +25,11 @@ setup(name='PoachEggs',
       author_email='python-virtualenv@groups.google.com',
       url='http://pypi.python.org/pypi/PoachEggs',
       license='MIT',
-      py_modules=['poacheggs'],
+      py_modules=['poacheggs', 'pyinstall'],
       entry_points="""
       [console_scripts]
       poacheggs = poacheggs:main
+      pyinstall = pyinstall:main
       """,
       )
       
