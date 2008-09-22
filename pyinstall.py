@@ -27,6 +27,7 @@ from Queue import Queue
 from Queue import Empty as QueueEmpty
 import threading
 import httplib
+import time
 
 class InstallationError(Exception):
     """General exception during installation"""
@@ -35,7 +36,7 @@ class DistributionNotFound(InstallationError):
     """Raised when a distribution cannot be found to satisfy a requirement"""
 
 if getattr(sys, 'real_prefix', None):
-    ## FIXME: is src/ really good?  Should it be something to imply these are just installation files?
+    ## FIXME: is build/ a good name?
     base_prefix = os.path.join(sys.prefix, 'build')
     base_src_prefix = os.path.join(sys.prefix, 'src')
 else:
@@ -57,6 +58,14 @@ parser.add_option(
     help='Install a package directly from a checkout.  Source will be checked '
     'out into src/PACKAGE (lower-case) and installed in-place (using '
     'setup.py develop).  This option may be provided multiple times.')
+parser.add_option(
+    '-r', '--requirement',
+    dest='requirements',
+    action='append',
+    default=[],
+    metavar='FILENAME',
+    help='Install all the packages listed in the given requirements file.  '
+    'This option can be used multiple times.')
 
 parser.add_option(
     '-f', '--find-links',
@@ -83,13 +92,13 @@ parser.add_option(
     '-b', '--build-dir', '--build-directory',
     dest='build_dir',
     metavar='DIR',
-    default=base_prefix,
+    default=None,
     help='Unpack packages into DIR (default %s) and build from there' % base_prefix)
 parser.add_option(
     '--src', '--source',
     dest='src_dir',
     metavar='DIR',
-    default=base_src_prefix,
+    default=None,
     help='Check out --editable packages into DIR (default %s)' % base_src_prefix)
 parser.add_option(
     '--timeout',
@@ -114,6 +123,11 @@ parser.add_option(
     dest='no_install',
     action='store_true',
     help="Download and unpack all packages, but don't actually install them")
+parser.add_option(
+    '--bundle',
+    dest='bundle',
+    metavar='BUNDLE_FILE',
+    help="Collect all packages and create a .pybundle file.")
 
 parser.add_option(
     '-v', '--verbose',
@@ -127,6 +141,11 @@ parser.add_option(
     action='count',
     default=0,
     help='Give less output')
+parser.add_option(
+    '--log',
+    dest='log',
+    metavar='FILENAME',
+    help='Log file where a complete (maximum verbosity) record will be kept')
 
 def main(args=None):
     global logger
@@ -138,11 +157,33 @@ def main(args=None):
     level += options.verbose
     level -= options.quiet
     level = poacheggs.Logger.level_for_integer(4-level)
-    logger = poacheggs.Logger([(level, sys.stdout)])
+    complete_log = []
+    logger = poacheggs.Logger([(level, sys.stdout), 
+                               (poacheggs.Logger.DEBUG, complete_log.append)])
+    if options.log:
+        log_fp = open_logfile_append(options.log)
+        logger.consumers.append((logger.DEBUG, log_fp))
+    else:
+        log_fp = None
     ## FIXME: this is hacky :(
     poacheggs.logger = logger
     socket.setdefaulttimeout(options.timeout or None)
 
+    if options.bundle:
+        if not options.build_dir:
+            options.build_dir = backup_dir(base_prefix, '-bundle')
+        if not options.src_dir:
+            options.src_dir = backup_dir(base_src_prefix, '-bundle')
+        # We have to get everything when creating a bundle:
+        options.ignore_installed = True
+        logger.notify('Putting temporary build files in %s and source/develop files in %s'
+                      % (display_path(options.build_dir), display_path(options.src_dir)))
+    if not options.build_dir:
+        options.build_dir = base_prefix
+    if not options.src_dir:
+        options.src_dir = base_src_prefix
+    options.build_dir = os.path.abspath(options.build_dir)
+    options.src_dir = os.path.abspath(options.src_dir)
     index_urls = [options.index_url] + options.extra_index_urls
     finder = PackageFinder(
         find_links=options.find_links,
@@ -153,25 +194,41 @@ def main(args=None):
                                      ignore_installed=options.ignore_installed)
     for name in args:
         requirement_set.add_requirement(
-            InstallRequirement(name, None))
+            InstallRequirement.from_line(name, None))
     for name in options.editables:
-        name, checkout_url = parse_editable(name)
         requirement_set.add_requirement(
-            InstallRequirement(name, None, editable=True, checkout_url=checkout_url))
+            InstallRequirement.from_editable(name))
+    for filename in options.requirements:
+        for req in parse_requirements(filename, finder=finder):
+            requirement_set.add_requirement(req)
+    exit = 0
     try:
         requirement_set.install_files(finder)
-        if not options.no_install:
+        if not options.no_install and not options.bundle:
             requirement_set.install()
             logger.notify('Successfully installed %s' % requirement_set)
+        elif options.bundle:
+            requirement_set.create_bundle(options.bundle)
+            logger.notify('Created bundle in %s' % options.bundle)
         else:
             logger.notify('Successfully downloaded %s' % requirement_set)
     except InstallationError, e:
         logger.fatal(str(e))
         logger.info('Exception information:\n%s' % format_exc())
-        sys.exit(1)
+        exit = 1
     except:
         logger.fatal('Exception:\n%s' % format_exc())
-        sys.exit(2)
+        exit = 2
+    if log_fp is not None:
+        log_fp.close()
+    if exit:
+        log_fn = './pyinstall-log.txt'
+        text = '\n'.join(complete_log)
+        logger.fatal('Storing complete log in %s' % log_fn)
+        log_fp = open_logfile_append(log_fn)
+        log_fp.write(text)
+        log_fp.close()
+    sys.exit(exit)
 
 def format_exc(exc_info=None):
     if exc_info is None:
@@ -379,7 +436,7 @@ class PackageFinder(object):
 class InstallRequirement(object):
 
     def __init__(self, req, comes_from, source_dir=None, editable=False,
-                 checkout_url=None):
+                 url=None):
         if isinstance(req, basestring):
             req = pkg_resources.Requirement.parse(req)
         self.req = req
@@ -387,17 +444,48 @@ class InstallRequirement(object):
         self.source_dir = source_dir
         self.editable = editable
         if editable:
-            assert checkout_url, "You must give checkout_url with editable=True"
-        else:
-            assert not checkout_url, "You cannot give checkout_url without editable=True"
-        self.checkout_url = checkout_url
+            assert url, "You must give url with editable=True"
+        self.url = url
         self._egg_info_path = None
         # This holds the pkg_resources.Distribution object if this requirement
         # is already available:
         self.satisfied_by = None
+        self._temp_build_dir = None
+        self._is_bundle = None
+
+    @classmethod
+    def from_editable(cls, editable_req, comes_from=None):
+        name, checkout_url = parse_editable(editable_req)
+        return cls(name, comes_from, editable=True, checkout_url=checkout_url)
+
+    @classmethod
+    def from_line(cls, name, comes_from=None):
+        """Creates an InstallRequirement from a name, which might be a
+        requirement, filename, or URL.
+        """
+        url = None
+        req = name
+        if is_url(name):
+            url = name
+            ## FIXME: I think getting the requirement here is a bad idea:
+            #req = get_requirement_from_url(url)
+            req = None
+        elif is_filename(name):
+            if not os.path.exists(name):
+                logger.warn('Requirement %r looks like a filename, but the file does not exist'
+                            % name)
+            url = filename_to_url(name)
+            #req = get_requirement_from_url(url)
+            req = None
+        return cls(req, comes_from, url=url)
 
     def __str__(self):
-        s = str(self.req)
+        if self.req:
+            s = str(self.req)
+            if self.url:
+                s += ' from %s' % self.url
+        else:
+            s = self.url
         if self.satisfied_by is not None:
             s += ' in %s' % display_path(self.satisfied_by.location)
         if self.editable:
@@ -421,6 +509,11 @@ class InstallRequirement(object):
         return s
 
     def build_location(self, build_dir):
+        if self._temp_build_dir is not None:
+            return self._temp_build_dir
+        if self.req is None:
+            self._temp_build_dir = tempfile.mkdtemp('-build', 'pyinstall-')
+            return self._temp_build_dir
         if self.editable:
             name = self.name.lower()
         else:
@@ -429,10 +522,14 @@ class InstallRequirement(object):
 
     @property
     def name(self):
+        if self.req is None:
+            return None
         return self.req.project_name
 
     @property
     def url_name(self):
+        if self.req is None:
+            return None
         return urllib.quote(self.req.unsafe_name)
 
     @property
@@ -441,7 +538,10 @@ class InstallRequirement(object):
 
     def run_egg_info(self):
         assert self.source_dir
-        logger.notify('Running setup.py egg_info for package %s' % self.name)
+        if self.name:
+            logger.notify('Running setup.py egg_info for package %s' % self.name)
+        else:
+            logger.notify('Running setup.py egg_info for package from %s' % self.url)
         logger.indent += 2
         try:
             script = self._run_setup_py
@@ -463,6 +563,8 @@ class InstallRequirement(object):
                 command_desc='python setup.py egg_info')
         finally:
             logger.indent -= 2
+        if not self.req:
+            self.req = pkg_resources.Requirement.parse(self.pkg_info()['Name'])
 
     ## FIXME: This is a lame hack, entirely for PasteScript which has
     ## a self-provided entry point that causes this awkwardness
@@ -654,29 +756,35 @@ execfile(__file__)
             return
         ## FIXME: this is not a useful record:
         ## Also a bad location
-        record_filename = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'install-record-%s.txt' % self.name)
+        ## And not right on Windows
+        install_location = os.path.join(sys.prefix, 'lib', 'python%s' % sys.version[:3])
+        record_filename = os.path.join(install_location, 'install-record-%s.txt' % self.name)
         ## FIXME: I'm not sure if this is a reasonable location; probably not
         ## but we can't put it in the default location, as that is a virtualenv symlink that isn't writable
         header_dir = os.path.join(os.path.dirname(os.path.dirname(self.source_dir)), 'lib', 'include')
         logger.notify('Running setup.py install for %s' % self.name)
         logger.indent += 2
         try:
-            try:
-                poacheggs.call_subprocess(
-                    [sys.executable, '-c',
-                     "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
-                     'install', '--single-version-externally-managed', '--record', record_filename,
-                     '--install-headers', header_dir],
-                    cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
-            except:
-                raise
-            else:
-                if os.path.exists(self.delete_marker_filename):
-                    logger.info('Removing source in %s' % self.source_dir)
-                    shutil.rmtree(self.source_dir)
-                    self.source_dir = None
+            poacheggs.call_subprocess(
+                [sys.executable, '-c',
+                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
+                 'install', '--single-version-externally-managed', '--record', record_filename,
+                 '--install-headers', header_dir],
+                cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
+
+    def remove_temporary_source(self):
+        """Remove the source files from this requirement, if they are marked
+        for deletion"""
+        if self.is_bundle or os.path.exists(self.delete_marker_filename):
+            logger.info('Removing source in %s' % self.source_dir)
+            if self.source_dir:
+                shutil.rmtree(self.source_dir)
+            self.source_dir = None
+            if self._temp_build_dir and os.path.exists(self._temp_build_dir):
+                shutil.rmtree(self._temp_build_dir)
+            self._temp_build_dir = None
 
     def install_editable(self):
         logger.notify('Running setup.py develop for %s' % self.name)
@@ -705,12 +813,60 @@ execfile(__file__)
 
     def check_if_exists(self):
         """Checks if this requirement is satisfied by something already installed"""
+        if self.req is None:
+            return False
         try:
             dist = pkg_resources.get_distribution(self.req)
         except pkg_resources.DistributionNotFound:
             return False
         self.satisfied_by = dist
         return True
+
+    @property
+    def is_bundle(self):
+        if self._is_bundle is not None:
+            return self._is_bundle
+        base = self._temp_build_dir
+        if not base:
+            ## FIXME: this doesn't seem right:
+            return False
+        self._is_bundle = os.path.exists(os.path.join(base, 'pyinstall-manifest.txt'))
+        return self._is_bundle
+    
+    def bundle_requirements(self):
+        base = self._temp_build_dir
+        assert base
+        src_dir = os.path.join(base, 'src')
+        build_dir = os.path.join(base, 'build')
+        if os.path.exists(src_dir):
+            for package in os.listdir(src_dir):
+                ## FIXME: svnism:
+                url = self._get_svn_url(os.path.join(src_dir, package))
+                yield InstallRequirement(
+                    package, self, editable=True, url=url)
+        if os.path.exists(build_dir):
+            for package in os.listdir(build_dir):
+                yield InstallRequirement(
+                    package, self)
+
+    def move_bundle_files(self, dest_build_dir, dest_src_dir):
+        base = self._temp_build_dir
+        assert base
+        src_dir = os.path.join(base, 'src')
+        build_dir = os.path.join(base, 'build')
+        for source_dir, dest_dir in [(src_dir, dest_src_dir),
+                                     (build_dir, dest_build_dir)]:
+            if os.path.exists(source_dir):
+                for dirname in os.listdir(source_dir):
+                    dest = os.path.join(dest_dir, dirname)
+                    if os.path.exists(dest):
+                        logger.warn('The directory %s (containing package %s) already exists; cannot move source from bundle %s'
+                                    % (dest, dirname, self))
+                        continue
+                    if not os.path.exists(dest_dir):
+                        logger.info('Creating directory %s' % dest_dir)
+                        os.makedirs(dest_dir)
+                    shutil.move(os.path.join(source_dir, dirname), dest)
 
     @property
     def delete_marker_filename(self):
@@ -733,6 +889,7 @@ class RequirementSet(object):
         self.upgrade = upgrade
         self.ignore_installed = ignore_installed
         self.requirements = {}
+        self.unnamed_requirements = []
 
     def __str__(self):
         reqs = [req for req in self.requirements.values()
@@ -742,16 +899,23 @@ class RequirementSet(object):
 
     def add_requirement(self, install_req):
         name = install_req.name
-        if name in self.requirements:
-            assert 0, (
-                "Double required: %s (aready in %s, name=%r)"
-                % (install_req, self.requirements[name], name))
-        self.requirements[name] = install_req
+        if not name:
+            self.unnamed_requirements.append(install_req)
+        else:
+            if name in self.requirements:
+                assert 0, (
+                    "Double required: %s (aready in %s, name=%r)"
+                    % (install_req, self.requirements[name], name))
+            self.requirements[name] = install_req
 
     def install_files(self, finder):
+        unnamed = list(self.unnamed_requirements)
         reqs = self.requirements.values()
-        while reqs:
-            req_to_install = reqs.pop(0)
+        while reqs or unnamed:
+            if unnamed:
+                req_to_install = unnamed.pop(0)
+            else:
+                req_to_install = reqs.pop(0)
             install = True
             if not self.ignore_installed and not req_to_install.editable:
                 if req_to_install.check_if_exists():
@@ -765,6 +929,7 @@ class RequirementSet(object):
             else:
                 logger.notify('Downloading/unpacking %s' % req_to_install)
             logger.indent += 2
+            is_bundle = False
             try:
                 if req_to_install.editable:
                     location = req_to_install.build_location(self.src_dir)
@@ -777,7 +942,12 @@ class RequirementSet(object):
                     unpack = True
                     if not os.path.exists(os.path.join(location, 'setup.py')):
                         ## FIXME: this won't upgrade when there's an existing package unpacked in `location`
-                        url = finder.find_requirement(req_to_install, upgrade=self.upgrade)
+                        if req_to_install.url is None:
+                            url = finder.find_requirement(req_to_install, upgrade=self.upgrade)
+                        else:
+                            ## FIXME: should req_to_install.url already be a link?
+                            url = Link(req_to_install.url)
+                            assert url
                         if url:
                             try:
                                 self.unpack_url(url, location)
@@ -790,30 +960,40 @@ class RequirementSet(object):
                         else:
                             unpack = False
                     if unpack:
-                        req_to_install.source_dir = location
-                        req_to_install.run_egg_info()
-                        req_to_install.assert_source_matches_version()
-                        f = open(req_to_install.delete_marker_filename, 'w')
-                        f.write(DELETE_MARKER_MESSAGE)
-                        f.close()
-                ## FIXME: shouldn't be globally added:
-                finder.add_dependency_links(req_to_install.dependency_links)
-                ## FIXME: add extras in here:
-                for req in req_to_install.requirements():
-                    try:
-                        name = pkg_resources.Requirement.parse(req).project_name
-                    except ValueError, e:
-                        ## FIXME: proper warning
-                        logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
-                        continue
-                    if name in self.requirements:
-                        ## FIXME: check for conflict
-                        continue
-                    subreq = InstallRequirement(req, req_to_install)
-                    reqs.append(subreq)
-                    self.add_requirement(subreq)
-                if req_to_install.name not in self.requirements:
-                    self.requirements[name] = req_to_install
+                        is_bundle = req_to_install.is_bundle
+                        if is_bundle:
+                            for subreq in req_to_install.bundle_requirements():
+                                reqs.append(subreq)
+                                self.add_requirement(subreq)
+                            req_to_install.move_bundle_files(self.build_dir, self.src_dir)
+                        else:
+                            req_to_install.source_dir = location
+                            req_to_install.run_egg_info()
+                            req_to_install.assert_source_matches_version()
+                            f = open(req_to_install.delete_marker_filename, 'w')
+                            f.write(DELETE_MARKER_MESSAGE)
+                            f.close()
+                if not is_bundle:
+                    ## FIXME: shouldn't be globally added:
+                    finder.add_dependency_links(req_to_install.dependency_links)
+                    ## FIXME: add extras in here:
+                    for req in req_to_install.requirements():
+                        try:
+                            name = pkg_resources.Requirement.parse(req).project_name
+                        except ValueError, e:
+                            ## FIXME: proper warning
+                            logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
+                            continue
+                        if name in self.requirements:
+                            ## FIXME: check for conflict
+                            continue
+                        subreq = InstallRequirement(req, req_to_install)
+                        reqs.append(subreq)
+                        self.add_requirement(subreq)
+                    if req_to_install.name not in self.requirements:
+                        self.requirements[req_to_install.name] = req_to_install
+                else:
+                    req_to_install.remove_temporary_source()
             finally:
                 logger.indent -= 2
 
@@ -834,7 +1014,7 @@ class RequirementSet(object):
             raise
         content_type = resp.info()['content-type']
         filename = link.filename
-        ext = os.path.splitext(filename)
+        ext = splitext(filename)
         if not ext:
             ext = mimetypes.guess_extension(content_type)
             filename += ext
@@ -886,12 +1066,12 @@ class RequirementSet(object):
 
     def unpack_file(self, filename, location, content_type, link):
         if (content_type == 'application/zip'
-            or filename.endswith('.zip')):
-            self.unzip_file(filename, location)
+            or filename.endswith('.zip')
+            or filename.endswith('.pybundle')):
+            self.unzip_file(filename, location, flatten=not filename.endswith('.pybundle'))
         elif (content_type == 'application/x-gzip'
               or tarfile.is_tarfile(filename)
-              ## FIXME: not sure if splitext will ever produce .tar.gz:
-              or os.path.splitext(filename)[1].lower() in ('.tar', '.tar.gz', '.tar.bz2', '.tgz')):
+              or splitext(filename)[1].lower() in ('.tar', '.tar.gz', '.tar.bz2', '.tgz')):
             self.untar_file(filename, location)
         elif (content_type.startswith('text/html')
               and is_svn_page(file_contents(filename))):
@@ -901,10 +1081,10 @@ class RequirementSet(object):
             ## FIXME: handle?
             ## FIXME: magic signatures?
             logger.fatal('Cannot unpack file %s (downloaded from %s, content-type: %s); cannot detect archive format'
-                         % (filename, url, content_type))
-            raise InstallationError('Cannot determine archive format of %s' % url)
+                         % (filename, location, content_type))
+            raise InstallationError('Cannot determine archive format of %s' % location)
 
-    def unzip_file(self, filename, location):
+    def unzip_file(self, filename, location, flatten=True):
         """Unzip the file (zip file located at filename) to the destination
         location"""
         if not os.path.exists(location):
@@ -912,7 +1092,7 @@ class RequirementSet(object):
         zipfp = open(filename, 'rb')
         try:
             zip = zipfile.ZipFile(zipfp)
-            leading = has_leading_dir(zip.namelist())
+            leading = has_leading_dir(zip.namelist()) and flatten
             for name in zip.namelist():
                 data = zip.read(name)
                 fn = name
@@ -979,7 +1159,10 @@ class RequirementSet(object):
         logger.notify('Exporting svn repository %s to %s' % (url, location))
         logger.indent += 2
         try:
-            poacheggs.call_subprocess(['svn', 'export', url, location],
+            ## FIXME: not sure that --force is good, but it is needed
+            ## when installing directly (not via a requirement),
+            ## because the destination directory already exists.
+            poacheggs.call_subprocess(['svn', 'export', '--force', url, location],
                                       filter_stdout=self._filter_svn, show_stdout=False)
         finally:
             logger.indent -= 2
@@ -998,8 +1181,73 @@ class RequirementSet(object):
                     # Already installed
                     continue
                 requirement.install()
+                requirement.remove_temporary_source()
         finally:
             logger.indent -= 2
+
+    def create_bundle(self, bundle_filename):
+        ## FIXME: can't decide which is better; zip is easier to read
+        ## random files from, but tar.bz2 is smaller and not as lame a
+        ## format.
+
+        ## FIXME: this file should really include a manifest of the
+        ## packages, maybe some other metadata files.  It would make
+        ## it easier to detect as well.
+        if 0:
+            tar = tarfile.open(bundle_filename, 'w:bz2')
+            ## FIXME: should there be cleanup?  E.g., kill the .egg-info directories?
+            ## Or kill .pyc files?
+            for dir, name in (self.build_dir, 'build'), (self.src_dir, 'src'):
+                if os.path.exists(dir):
+                    tar.add(dir, name)
+            tar.close()
+        else:
+            zip = zipfile.ZipFile(bundle_filename, 'w', zipfile.ZIP_DEFLATED)
+            for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
+                dir = os.path.normcase(os.path.abspath(dir))
+                for dirpath, dirnames, filenames in os.walk(dir):
+                    for filename in filenames:
+                        filename = os.path.join(dirpath, filename)
+                        name = self._clean_zip_name(filename, dir)
+                        zip.write(filename, basename + '/' + name)
+            zip.writestr('pyinstall-manifest.txt', self.bundle_requirements())
+            zip.close()
+        # Unlike installation, this will always delete the build directories
+        logger.info('Removing temporary build dir %s and source dir %s'
+                    % (self.build_dir, self.src_dir))
+        for dir in self.build_dir, self.src_dir:
+            if os.path.exists(dir):
+                shutil.rmtree(dir)
+
+    BUNDLE_HEADER = '''\
+# This is a pyinstall bundle file, that contains many source packages
+# that can be installed as a group.  You can install this like:
+#     pyinstall this_file.zip
+# The rest of the file contains a list of all the packages included:
+'''
+
+    def bundle_requirements(self):
+        parts = [self.BUNDLE_HEADER]
+        for req in sorted(
+            [req for req in self.requirements.values()
+             if not req.comes_from],
+            key=lambda x: x.name):
+            parts.append('%s==%s\n' % (req.name, req.installed_version))
+        parts.append('# These packages were installed to satisfy the above requirements:\n')
+        for req in sorted(
+            [req for req in self.requirements.values()
+             if req.comes_from],
+            key=lambda x: x.name):
+            parts.append('%s==%s\n' % (req.name, req.installed_version))
+        ## FIXME: should we do something with self.unnamed_requirements?
+        return ''.join(parts)
+
+    def _clean_zip_name(self, name, prefix):
+        assert name.startswith(prefix+'/'), (
+            "name %r doesn't start with prefix %r" % (name, prefix))
+        name = name[len(prefix)+1:]
+        name = name.replace(os.path.sep, '/')
+        return name
 
 class HTMLPage(object):
     """Represents one page, along with its URL"""
@@ -1205,11 +1453,7 @@ class Link(object):
         return urlparse.urlsplit(self.url)[2]
 
     def splitext(self):
-        base, ext = posixpath.splitext(posixpath.basename(self.path.rstrip('/')))
-        if base.endswith('.tar'):
-            ext = '.tar' + ext
-            base = base[:-4]
-        return base, ext
+        return splitext(posixpath.basename(self.path.rstrip('/')))
 
     _egg_fragment_re = re.compile(r'#egg=([^&]*)')
 
@@ -1232,6 +1476,85 @@ class Link(object):
     @property
     def show_url(self):
         return posixpath.basename(self.url.split('#', 1)[0].split('?', 1)[0])
+
+############################################################
+## Requirement files
+
+_scheme_re = re.compile(r'^(http|https|file):', re.I)
+_drive_re = re.compile(r'/*([a-z])\|', re.I)
+def get_file_content(url, comes_from=None):
+    """Gets the content of a file; it may be a filename, file: URL, or
+    http: URL.  Returns (location, content)"""
+    match = _scheme_re.search(url)
+    if match:
+        scheme = match.group(1).lower()
+        if (scheme == 'file' and comes_from
+            and comes_from.startswith('http')):
+            raise InstallationError(
+                'Requirements file %s references URL %s, which is local'
+                % (comes_from, url))
+        if scheme == 'file':
+            path = url.split(':', 1)[1]
+            path = path.replace('\\', '/')
+            match = _drive_re.match(path)
+            if match:
+                path = match.group(1) + ':' + path.split('|', 1)[1]
+            path = urllib.unquote(path)
+            if path.startswith('/'):
+                path = '/' + path.lstrip('/')
+            url = path
+        else:
+            ## FIXME: catch some errors
+            resp = urllib2.urlopen(url)
+            return resp.geturl(), resp.read()
+    f = open(url)
+    content = f.read()
+    f.close()
+    return url, content
+
+def parse_requirements(filename, finder, comes_from=None):
+    filename, content = get_file_content(filename, comes_from=comes_from)
+    for line_number, line in enumerate(content.splitlines()):
+        line_number += 1
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('-r') or line.startswith('--requirement'):
+            if line.startswith('-r'):
+                req_url = line[2:].strip()
+            else:
+                req_url = line[len('--requirement'):].strip().strip('=')
+            if _scheme_re.search(filename):
+                # Relative to a URL
+                req_url = urlparse.urljoin(filename, url)
+            elif not _scheme_re.search(req_url):
+                req_url = os.path.join(os.path.basename(filename), url)
+            for item in parse_requirements(req_url, finder, comes_from=filename):
+                yield item
+        elif line.startswith('-Z') or line.startswith('--always-unzip'):
+            # No longer used, but previously these were used in
+            # requirement files, so we'll ignore.
+            pass
+        elif line.startswith('-f') or line.startswith('--find-links'):
+            if line.startswith('-f'):
+                line = line[2:].strip()
+            else:
+                line = line[len('--find-links'):].strip().lstrip('=')
+            ## FIXME: it would be nice to keep track of the source of
+            ## the find_links:
+            finder.find_links.append(line)
+        else:
+            comes_from = '-r %s (line %s)' % (filename, line_number)
+            if line.startswith('-e') or line.startswith('--editable'):
+                if line.startswith('-e'):
+                    line = line[2:].strip()
+                else:
+                    line = line[len('--editable'):].strip()
+                req = InstallRequirement.from_editable(
+                    line, comes_from)
+            else:
+                req = InstallRequirement(line, comes_from)
+            yield req
 
 ############################################################
 ## Utility functions
@@ -1308,6 +1631,7 @@ def parse_editable(editable_req):
             '--editable=%s is not the right format; it must have #egg=Package'
             % editable_req)
     req = match.group(1)
+    ## FIXME: use package_to_requirement?
     match = re.search(r'^(.*?)(?:-dev|-\d.*)', req)
     if match:
         # Strip off -dev, -0.2, etc.
@@ -1324,15 +1648,15 @@ def parse_editable(editable_req):
             'For --editable=%s only svn (svn+URL) is currently supported' % editable_req)
     return req, url
 
-def backup_dir(dir):
+def backup_dir(dir, ext='.bak'):
     """Figure out the name of a directory to back up the given dir to
     (adding .bak, .bak2, etc)"""
     n = 1
-    ext = '.bak'
+    extension = ext
     while os.path.exists(dir + ext):
         n += 1
-        ext = '.bak%s' % n
-    return dir + ext
+        extension = ext + str(n)
+    return dir + extension
 
 def ask(message, options):
     """Ask the message interactively, with the given possible responses"""
@@ -1344,6 +1668,96 @@ def ask(message, options):
                 response, ', '.join(options))
         else:
             return response
+
+def open_logfile_append(filename):
+    """Open the named log file in append mode.
+
+    If the file already exists, a separator will also be printed to
+    the file to separate past activity from current activity.
+    """
+    exists = os.path.exists(filename)
+    log_fp = open(filename, 'a')
+    if exists:
+        print >> log_fp, '-'*60
+        print >> log_fp, '%s run on %s' % (sys.argv[0], time.strftime('%c'))
+    return log_fp
+
+def is_url(name):
+    """Returns true if the name looks like a URL"""
+    if ':' not in name:
+        return False
+    scheme = name.split(':', 1)[0].lower()
+    return scheme in ('http', 'https', 'file', 'ftp')
+
+def is_filename(name):
+    if (splitext(name)[1].lower() in ('.zip', '.tar.gz', '.tar.bz2', '.tgz', '.tar', '.pybundle')
+        and os.path.exists(name)):
+        return True
+    if os.path.sep not in name and '/' not in name:
+        # Doesn't have any path components, probably a requirement like 'Foo'
+        return False
+    return True
+
+_drive_re = re.compile('^([a-z]):', re.I)
+_url_drive_re = re.compile('^([a-z])[|]', re.I)
+
+def filename_to_url(filename):
+    """
+    Convert a path to a file: URL.  The path will be made absolute.
+    """
+    filename = os.path.normcase(os.path.abspath(filename))
+    url = urllib.quote(filename)
+    if _drive_re.match(url):
+        url = url[0] + '|' + url[2:]
+    url = url.replace(os.path.sep, '/')
+    url = url.lstrip('/')
+    return 'file:///' + url
+
+def url_to_filename(url):
+    """
+    Convert a file: URL to a path.
+    """
+    assert url.startswith('file:'), (
+        "You can only turn file: urls into filenames (not %r)" % url)
+    filename = url[len('file:'):].lstrip('/')
+    filename = urllib.unquote(filename)
+    if _url_drive_re.match(filename):
+        filename = filename[0] + ':' + filename[2:]
+    else:
+        filename = '/' + filename
+    return filename
+
+def get_requirement_from_url(url):
+    """Get a requirement from the URL, if possible.  This looks for #egg
+    in the URL"""
+    link = Link(url)
+    egg_info = link.egg_fragment
+    if not egg_info:
+        egg_info = splitext(link.filename)[0]
+    return package_to_requirement(egg_info)
+
+def package_to_requirement(package_name):
+    """Translate a name like Foo-1.2 to Foo==1.3"""
+    match = re.search(r'^(.*?)(-dev|-\d.*)', package_name)
+    if match:
+        name = match.group(1)
+        version = match.group(2)
+    else:
+        name = package_name
+        version = ''
+    if version:
+        return '%s==%s' % (name, version)
+    else:
+        return name
+
+
+def splitext(path):
+    """Like os.path.splitext, but take off .tar too"""
+    base, ext = posixpath.splitext(path)
+    if base.lower().endswith('.tar'):
+        ext = base[-4:] + ext
+        base = base[:-4]
+    return base, ext
 
 class _Inf(object):
     """I am bigger than everything!"""
