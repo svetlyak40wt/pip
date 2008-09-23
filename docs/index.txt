@@ -46,7 +46,7 @@ pyinstall cannot install some packages.  Specifically:
 
 * Maybe it doesn't work on Windows.  At least, the author doesn't test on Windows often.
 
-* It also has some awesome extra features.  Awesome!
+* It also has some extra features.  Extra features the author thinks are great.
 
 Requirements Files
 ------------------
