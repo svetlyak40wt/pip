@@ -123,11 +123,19 @@ parser.add_option(
     dest='no_install',
     action='store_true',
     help="Download and unpack all packages, but don't actually install them")
+
 parser.add_option(
     '--bundle',
     dest='bundle',
     metavar='BUNDLE_FILE',
     help="Collect all packages and create a .pybundle file.")
+parser.add_option(
+    '--freeze',
+    dest='freeze',
+    metavar='FREEZE_FILE',
+    help="Create a file that can be used with --requirement to reproduce the "
+    "installed packages.  You can also give one --requirement file that will "
+    "be used as the basis of the new file.")
 
 parser.add_option(
     '-v', '--verbose',
@@ -184,25 +192,38 @@ def main(args=None):
         options.src_dir = base_src_prefix
     options.build_dir = os.path.abspath(options.build_dir)
     options.src_dir = os.path.abspath(options.src_dir)
-    index_urls = [options.index_url] + options.extra_index_urls
-    finder = PackageFinder(
-        find_links=options.find_links,
-        index_urls=index_urls)
-    requirement_set = RequirementSet(build_dir=options.build_dir,
-                                     src_dir=options.src_dir,
-                                     upgrade=options.upgrade,
-                                     ignore_installed=options.ignore_installed)
-    for name in args:
-        requirement_set.add_requirement(
-            InstallRequirement.from_line(name, None))
-    for name in options.editables:
-        requirement_set.add_requirement(
-            InstallRequirement.from_editable(name))
-    for filename in options.requirements:
-        for req in parse_requirements(filename, finder=finder):
-            requirement_set.add_requirement(req)
-    exit = 0
     try:
+        if options.freeze:
+            if options.requirements:
+                if len(options.requirements) > 1:
+                    raise InstallationError(
+                        "When using --freeze you can only provide one --requirement option")
+                requirement = options.requirements[0]
+            else:
+                requirement = None
+            write_freeze(
+                options.freeze,
+                requirement=requirement,
+                find_links=options.find_links)
+            return
+        index_urls = [options.index_url] + options.extra_index_urls
+        finder = PackageFinder(
+            find_links=options.find_links,
+            index_urls=index_urls)
+        requirement_set = RequirementSet(build_dir=options.build_dir,
+                                         src_dir=options.src_dir,
+                                         upgrade=options.upgrade,
+                                         ignore_installed=options.ignore_installed)
+        for name in args:
+            requirement_set.add_requirement(
+                InstallRequirement.from_line(name, None))
+        for name in options.editables:
+            requirement_set.add_requirement(
+                InstallRequirement.from_editable(name))
+        for filename in options.requirements:
+            for req in parse_requirements(filename, finder=finder):
+                requirement_set.add_requirement(req)
+        exit = 0
         requirement_set.install_files(finder)
         if not options.no_install and not options.bundle:
             requirement_set.install()
@@ -1046,6 +1067,7 @@ class RequirementSet(object):
                     logger.start_progress('Downloading %s (unknown size): ' % show_url)
             else:
                 logger.notify('Downloading %s' % show_url)
+            logger.debug('Downloading from URL %s' % link)
             while 1:
                 chunk = resp.read(4096)
                 if not chunk:
@@ -1484,6 +1506,269 @@ class Link(object):
     @property
     def show_url(self):
         return posixpath.basename(self.url.split('#', 1)[0].split('?', 1)[0])
+
+############################################################
+## Writing freeze files
+
+
+def write_freeze(filename, requirement, find_links, find_tags=False):
+    if filename == '-':
+        logger.move_stdout_to_stderr()
+    dependency_links = []
+    if filename == '-':
+        f = sys.stdout
+    else:
+        ## FIXME: should be possible to overwrite requirement file
+        logger.notify('Writing frozen requirements to %s' % filename)
+        f = open(filename, 'w')
+    for dist in pkg_resources.working_set:
+        if dist.has_metadata('dependency_links.txt'):
+            dependency_links.extend(dist.get_metadata_lines('dependency_links.txt'))
+    for link in find_links:
+        if '#egg=' in link:
+            dependency_links.append(link)
+    for link in find_links:
+        f.write('-f %s\n' % link)
+    installations = {}
+    for dist in pkg_resources.working_set:
+        if dist.key in ('setuptools', 'poacheggs', 'python'):
+            ## FIXME: also skip virtualenv?
+            continue
+        req = FrozenRequirement.from_dist(dist, dependency_links, find_tags=find_tags)
+        installations[req.name] = req
+    if requirement:
+        req_f = open(requirement)
+        for line in req_f:
+            if not line or line.strip().startswith('#'):
+                f.write(line)
+                continue
+            elif line.startswith('-e') or line.startswith('--editable'):
+                if line.startswith('-e'):
+                    line = line[2:].strip()
+                else:
+                    line = line[len('--editable'):].strip().lstrip('=')
+                line_req = InstallRequirement.from_editable(line)
+            elif (line.startswith('-r') or line.startswith('--requirement')
+                  or line.startswith('-Z') or line.startswith('--always-unzip')):
+                logger.debug('Skipping line %r' % line.strip())
+                continue
+            else:
+                line_req = InstallRequirement.from_line(line)
+            if not line_req.name:
+                logger.notify("Skipping line because it's not clear what it would install: %s"
+                              % line.strip())
+                continue
+            if line_req.name not in installations:
+                logger.warn("Requirement file contains %s, but that package is not installed"
+                            % line.strip())
+                continue
+            f.write(str(installations[line_req.name]))
+            del installations[line_req.name]
+        f.write('## The following requirements were added by pyinstall --freeze:\n')
+    for installation in sorted(installations.values(), key=lambda x: x.name):
+        f.write(str(installation))
+    if filename != '-':
+        logger.notify('Put requirements in %s' % filename)
+        f.close()
+
+class FrozenRequirement(object):
+
+    def __init__(self, name, req, editable, comments=()):
+        self.name = name
+        self.req = req
+        self.editable = editable
+        self.comments = comments
+
+    _rev_re = re.compile(r'-r(\d+)$')
+    _date_re = re.compile(r'-(20\d\d\d\d\d\d)$')
+
+    @classmethod
+    def from_dist(cls, dist, dependency_links, find_tags=False):
+        location = os.path.normcase(os.path.abspath(dist.location))
+        comments = []
+        if os.path.exists(os.path.join(location, '.svn')):
+            editable = True
+            req = get_src_requirement(dist, location, find_tags)
+        else:
+            editable = False
+            req = dist.as_requirement()
+            specs = req.specs
+            assert len(specs) == 1 and specs[0][0] == '=='
+            version = specs[0][1]
+            ver_match = cls._rev_re.search(version)
+            date_match = cls._date_re.search(version)
+            if ver_match or date_match:
+                svn_location = get_svn_location(dist, dependency_links)
+                if not svn_location:
+                    logger.warn(
+                        'Warning: cannot find svn location for %s' % req)
+                    comments.append('## FIXME: could not find svn URL in dependency_links for this package:')
+                else:
+                    comments.append('# Installing as editable to satisfy requirement %s:' % req)
+                    if ver_match:
+                        rev = ver_match.group(1)
+                    else:
+                        rev = '{%s}' % date_match.group(1)
+                    editable = True
+                    req = '%s@%s#egg=%s' % (svn_location, rev, dist.egg_name())
+        return cls(dist.project_name, req, editable, comments)
+
+    def __str__(self):
+        req = self.req
+        if self.editable:
+            req = '-e %s' % req
+        return '\n'.join(list(self.comments)+[str(req)])+'\n'
+
+def get_svn_location(dist, dependency_links):
+    egg_fragment_re = re.compile(r'#egg=(.*)$')
+    for url in dependency_links:
+        egg_fragment = Link(url).egg_fragment
+        if not egg_fragment:
+            continue
+        if '-' in egg_fragment:
+            ## FIXME: will this work when a package has - in the name?
+            key = '-'.join(egg_fragment.split('-')[:-1]).lower()
+        else:
+            key = egg_fragment
+        if key == dist.key:
+            return url.split('#', 1)[0]
+    return None
+
+def get_src_requirement(dist, location, find_tags):
+    if not os.path.exists(os.path.join(location, '.svn')):
+        logger.warn('cannot determine version of editable source in %s (is not svn checkout)' % location)
+        return dist.as_requirement()
+    repo = get_svn_url(location)
+    if repo is None:
+        return None
+    parts = repo.split('/')
+    ## FIXME: why not project name?
+    egg_project_name = dist.egg_name().split('-', 1)[0]
+    if parts[-2] in ('tags', 'tag'):
+        # It's a tag, perfect!
+        return '%s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
+    elif parts[-2] in ('branches', 'branch'):
+        # It's a branch :(
+        rev = get_svn_revision(location)
+        return '%s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
+    elif parts[-1] == 'trunk':
+        # Trunk :-/
+        rev = get_svn_revision(location)
+        if find_tags:
+            tag_url = '/'.join(parts[:-1]) + '/tags'
+            tag_revs = get_tag_revs(tag_url)
+            match = find_tag_match(rev, tag_revs)
+            if match:
+                logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
+                return '%s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
+        return '%s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
+    else:
+        # Don't know what it is
+        logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
+        rev = get_svn_revision(location)
+        return '%s@%s#egg=%s-dev' % (repo, rev, egg_project_name)
+
+_svn_url_re = re.compile('url="([^"]+)"')
+_svn_rev_re = re.compile('committed-rev="(\d+)"')
+
+def get_svn_revision(location):
+    """
+    Return the maximum revision for all files under a given location
+    """
+    # Note: taken from setuptools.command.egg_info
+    revision = 0
+
+    for base, dirs, files in os.walk(location):
+        if '.svn' not in dirs:
+            dirs[:] = []
+            continue    # no sense walking uncontrolled subdirs
+        dirs.remove('.svn')
+        entries_fn = os.path.join(base, '.svn', 'entries')
+        if not os.path.exists(entries_fn):
+            ## FIXME: should we warn?
+            continue
+        f = open(entries_fn)
+        data = f.read()
+        f.close()
+
+        if data.startswith('8') or data.startswith('9'):
+            data = map(str.splitlines,data.split('\n\x0c\n'))
+            del data[0][0]  # get rid of the '8'
+            dirurl = data[0][3]
+            revs = [int(d[9]) for d in data if len(d)>9 and d[9]]+[0]
+            if revs:
+                localrev = max(revs)
+            else:
+                localrev = 0
+        elif data.startswith('<?xml'):
+            dirurl = _svn_url_re.search(data).group(1)    # get repository URL
+            revs = [int(m.group(1)) for m in _svn_rev_re.finditer(data)]+[0]
+            if revs:
+                localrev = max(revs)
+            else:
+                localrev = 0
+        else:
+            logger.warn("Unrecognized .svn/entries format; skipping %s", base)
+            dirs[:] = []
+            continue
+        if base == location:
+            base_url = dirurl+'/'   # save the root url
+        elif not dirurl.startswith(base_url):
+            dirs[:] = []
+            continue    # not part of the same svn tree, skip it
+        revision = max(revision, localrev)
+
+    return revision
+
+def get_svn_url(location):
+    # In cases where the source is in a subdirectory, not alongside setup.py
+    # we have to look up in the location until we find a real setup.py
+    orig_location = location
+    while not os.path.exists(os.path.join(location, 'setup.py')):
+        last_location = location
+        location = os.path.dirname(location)
+        if location == last_location:
+            # We've traversed up to the root of the filesystem without finding setup.py
+            logger.warn("Could not find setup.py for directory %s (tried all parent directories)"
+                        % orig_location)
+            return None
+    f = open(os.path.join(location, '.svn', 'entries'))
+    data = f.read()
+    f.close()
+    if data.startswith('8'):
+        data = map(str.splitlines,data.split('\n\x0c\n'))
+        del data[0][0]  # get rid of the '8'
+        return data[0][3]
+    elif data.startswith('<?xml'):
+        return _svn_url_re.search(data).group(1)    # get repository URL
+    else:
+        logger.warn("unrecognized .svn/entries format in %s" % location)
+        # Or raise exception?
+        return None
+
+def get_tag_revs(svn_tag_url):
+    stdout = poacheggs.call_subprocess(
+        ['svn', 'ls', '-v', svn_tag_url], show_stdout=False)
+    results = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        rev = int(parts[0])
+        tag = parts[-1].strip('/')
+        results.append((tag, rev))
+    return results
+
+def find_tag_match(rev, tag_revs):
+    best_match_rev = None
+    best_tag = None
+    for tag, tag_rev in tag_revs:
+        if (tag_rev > rev and
+            (best_match_rev is None or best_match_rev > tag_rev)):
+            # FIXME: Is best_match > tag_rev really possible?
+            # or is it a sign something is wacky?
+            best_match_rev = tag_rev
+            best_tag = tag
+    return best_tag
+
 
 ############################################################
 ## Requirement files
