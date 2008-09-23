@@ -19,7 +19,6 @@ except ImportError:
     import md5
 import urlparse
 from email.FeedParser import FeedParser
-import poacheggs
 import traceback
 from cStringIO import StringIO
 import socket
@@ -164,17 +163,15 @@ def main(args=None):
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
-    level = poacheggs.Logger.level_for_integer(4-level)
+    level = Logger.level_for_integer(4-level)
     complete_log = []
-    logger = poacheggs.Logger([(level, sys.stdout), 
-                               (poacheggs.Logger.DEBUG, complete_log.append)])
+    logger = Logger([(level, sys.stdout), 
+                     (Logger.DEBUG, complete_log.append)])
     if options.log:
         log_fp = open_logfile_append(options.log)
         logger.consumers.append((logger.DEBUG, log_fp))
     else:
         log_fp = None
-    ## FIXME: this is hacky :(
-    poacheggs.logger = logger
     socket.setdefaulttimeout(options.timeout or None)
 
     if options.bundle:
@@ -577,10 +574,10 @@ class InstallRequirement(object):
                 if not os.path.exists(egg_info_dir):
                     os.makedirs(egg_info_dir)
                 egg_base_option = ['--egg-base', 'pyinstall-egg-info']
-            poacheggs.call_subprocess(
+            call_subprocess(
                 [sys.executable, '-c', script, 'egg_info'] + egg_base_option,
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False,
-                command_level=poacheggs.Logger.VERBOSE_DEBUG,
+                command_level=Logger.VERBOSE_DEBUG,
                 command_desc='python setup.py egg_info')
         finally:
             logger.indent -= 2
@@ -731,7 +728,7 @@ execfile(__file__)
                 logger.info('Checkout in %s exists, and has correct URL (%s)'
                             % (display_path(self.source_dir), url))
                 logger.notify('Updating checkout %s%s' % (display_path(self.source_dir), rev_display))
-                poacheggs.call_subprocess(
+                call_subprocess(
                     ['svn', 'update'] + rev_options + [self.source_dir])
             else:
                 logger.warn('svn checkout in %s exists with URL %s' % (display_path(self.source_dir), existing_url))
@@ -740,7 +737,7 @@ execfile(__file__)
                 if response == 's':
                     logger.notify('Switching checkout %s to %s%s'
                                   % (display_path(self.source_dir), url, rev_display))
-                    poacheggs.call_subprocess(
+                    call_subprocess(
                         ['svn', 'switch'] + rev_options + [url, self.source_dir])
                 elif response == 'i':
                     # do nothing
@@ -756,14 +753,14 @@ execfile(__file__)
                     checkout = True
         if checkout:
             logger.notify('Checking out %s%s to %s' % (url, rev_display, display_path(self.source_dir)))
-            poacheggs.call_subprocess(
+            call_subprocess(
                 ['svn', 'checkout', '-q'] + rev_options + [url, self.source_dir])
 
     _svn_url_re = re.compile(r'URL: (.+)')
 
     def _get_svn_url(self, dir):
-        output = poacheggs.call_subprocess(['svn', 'info', dir], show_stdout=False,
-                                           extra_environ={'LANG': 'C'})
+        output = call_subprocess(['svn', 'info', dir], show_stdout=False,
+                                 extra_environ={'LANG': 'C'})
         match = self._svn_url_re.search(output)
         if not match:
             logger.warn('Cannot determine URL of svn checkout %s' % display_path(dir))
@@ -786,7 +783,7 @@ execfile(__file__)
         logger.notify('Running setup.py install for %s' % self.name)
         logger.indent += 2
         try:
-            poacheggs.call_subprocess(
+            call_subprocess(
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
                  'install', '--single-version-externally-managed', '--record', record_filename,
@@ -812,7 +809,7 @@ execfile(__file__)
         logger.indent += 2
         try:
             ## FIXME: should we do --install-headers here too?
-            poacheggs.call_subprocess(
+            call_subprocess(
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py),
                  'develop'], cwd=self.source_dir, filter_stdout=self._filter_install,
@@ -821,14 +818,14 @@ execfile(__file__)
             logger.indent -= 2
 
     def _filter_install(self, line):
-        level = poacheggs.Logger.NOTIFY
+        level = Logger.NOTIFY
         for regex in [r'^running .*', r'^writing .*', '^creating .*', '^[Cc]opying .*',
                       r'^reading .*', r"^removing .*\.egg-info' \(and everything under it\)$",
                       r'^byte-compiling ',
                       # Not sure what this warning is, but it seems harmless:
                       r"^warning: manifest_maker: standard file '-c' not found$"]:
             if re.search(regex, line.strip()):
-                level = poacheggs.Logger.INFO
+                level = Logger.INFO
                 break
         return (level, line)
 
@@ -1192,13 +1189,13 @@ class RequirementSet(object):
             ## FIXME: not sure that --force is good, but it is needed
             ## when installing directly (not via a requirement),
             ## because the destination directory already exists.
-            poacheggs.call_subprocess(['svn', 'export', '--force', url, location],
+            call_subprocess(['svn', 'export', '--force', url, location],
                                       filter_stdout=self._filter_svn, show_stdout=False)
         finally:
             logger.indent -= 2
 
     def _filter_svn(self, line):
-        return (poacheggs.Logger.INFO, line)
+        return (Logger.INFO, line)
 
     def install(self):
         """Install everything in this set (after having downloaded and unpacked the packages)"""
@@ -1531,7 +1528,7 @@ def write_freeze(filename, requirement, find_links, find_tags=False):
         f.write('-f %s\n' % link)
     installations = {}
     for dist in pkg_resources.working_set:
-        if dist.key in ('setuptools', 'poacheggs', 'python'):
+        if dist.key in ('setuptools', 'pyinstall', 'python'):
             ## FIXME: also skip virtualenv?
             continue
         req = FrozenRequirement.from_dist(dist, dependency_links, find_tags=find_tags)
@@ -1747,7 +1744,7 @@ def get_svn_url(location):
         return None
 
 def get_tag_revs(svn_tag_url):
-    stdout = poacheggs.call_subprocess(
+    stdout = call_subprocess(
         ['svn', 'ls', '-v', svn_tag_url], show_stdout=False)
     results = []
     for line in stdout.splitlines():
@@ -1848,6 +1845,241 @@ def parse_requirements(filename, finder, comes_from=None):
             else:
                 req = InstallRequirement(line, comes_from)
             yield req
+
+############################################################
+## Logging
+
+
+
+class Logger(object):
+
+    """
+    Logging object for use in command-line script.  Allows ranges of
+    levels, to avoid some redundancy of displayed information.
+    """
+
+    VERBOSE_DEBUG = logging.DEBUG-1
+    DEBUG = logging.DEBUG
+    INFO = logging.INFO
+    NOTIFY = (logging.INFO+logging.WARN)/2
+    WARN = WARNING = logging.WARN
+    ERROR = logging.ERROR
+    FATAL = logging.FATAL
+
+    LEVELS = [VERBOSE_DEBUG, DEBUG, INFO, NOTIFY, WARN, ERROR, FATAL]
+
+    def __init__(self, consumers):
+        self.consumers = consumers
+        self.indent = 0
+        self.in_progress = None
+        self.in_progress_hanging = False
+
+    def debug(self, msg, *args, **kw):
+        self.log(self.DEBUG, msg, *args, **kw)
+    def info(self, msg, *args, **kw):
+        self.log(self.INFO, msg, *args, **kw)
+    def notify(self, msg, *args, **kw):
+        self.log(self.NOTIFY, msg, *args, **kw)
+    def warn(self, msg, *args, **kw):
+        self.log(self.WARN, msg, *args, **kw)
+    def error(self, msg, *args, **kw):
+        self.log(self.WARN, msg, *args, **kw)
+    def fatal(self, msg, *args, **kw):
+        self.log(self.FATAL, msg, *args, **kw)
+    def log(self, level, msg, *args, **kw):
+        if args:
+            if kw:
+                raise TypeError(
+                    "You may give positional or keyword arguments, not both")
+        args = args or kw
+        rendered = None
+        for consumer_level, consumer in self.consumers:
+            if self.level_matches(level, consumer_level):
+                if (self.in_progress_hanging
+                    and consumer in (sys.stdout, sys.stderr)):
+                    self.in_progress_hanging = False
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
+                if rendered is None:
+                    if args:
+                        rendered = msg % args
+                    else:
+                        rendered = msg
+                    rendered = ' '*self.indent + rendered
+                if hasattr(consumer, 'write'):
+                    consumer.write(rendered+'\n')
+                else:
+                    consumer(rendered)
+
+    def start_progress(self, msg):
+        assert not self.in_progress, (
+            "Tried to start_progress(%r) while in_progress %r"
+            % (msg, self.in_progress))
+        if self.level_matches(self.NOTIFY, self._stdout_level()):
+            sys.stdout.write(' '*self.indent + msg)
+            sys.stdout.flush()
+            self.in_progress_hanging = True
+        else:
+            self.in_progress_hanging = False
+        self.in_progress = msg
+        self.last_message = None
+
+    def end_progress(self, msg='done.'):
+        assert self.in_progress, (
+            "Tried to end_progress without start_progress")
+        if self.stdout_level_matches(self.NOTIFY):
+            if not self.in_progress_hanging:
+                # Some message has been printed out since start_progress
+                sys.stdout.write('...' + self.in_progress + msg + '\n')
+                sys.stdout.flush()
+            else:
+                # These erase any messages shown with show_progress (besides .'s)
+                logger.show_progress('')
+                logger.show_progress('')
+                sys.stdout.write(msg + '\n')
+                sys.stdout.flush()
+        self.in_progress = None
+        self.in_progress_hanging = False
+
+    def show_progress(self, message=None):
+        """If we are in a progress scope, and no log messages have been
+        shown, write out another '.'"""
+        if self.in_progress_hanging:
+            if message is None:
+                sys.stdout.write('.')
+                sys.stdout.flush()
+            else:
+                if self.last_message:
+                    padding = ' ' * max(0, len(self.last_message)-len(message))
+                else:
+                    padding = ''
+                sys.stdout.write('\r%s%s%s%s' % (' '*self.indent, self.in_progress, message, padding))
+                sys.stdout.flush()
+                self.last_message = message
+
+    def stdout_level_matches(self, level):
+        """Returns true if a message at this level will go to stdout"""
+        return self.level_matches(level, self._stdout_level())
+
+    def _stdout_level(self):
+        """Returns the level that stdout runs at"""
+        for level, consumer in self.consumers:
+            if consumer is sys.stdout:
+                return level
+        return self.FATAL
+
+    def level_matches(self, level, consumer_level):
+        """
+        >>> l = Logger()
+        >>> l.level_matches(3, 4)
+        False
+        >>> l.level_matches(3, 2)
+        True
+        >>> l.level_matches(slice(None, 3), 3)
+        False
+        >>> l.level_matches(slice(None, 3), 2)
+        True
+        >>> l.level_matches(slice(1, 3), 1)
+        True
+        >>> l.level_matches(slice(2, 3), 1)
+        False
+        """
+        if isinstance(level, slice):
+            start, stop = level.start, level.stop
+            if start is not None and start > consumer_level:
+                return False
+            if stop is not None or stop <= consumer_level:
+                return False
+            return True
+        else:
+            return level >= consumer_level
+
+    @classmethod
+    def level_for_integer(cls, level):
+        levels = cls.LEVELS
+        if level < 0:
+            return levels[0]
+        if level >= len(levels):
+            return levels[-1]
+        return levels[level]
+
+    def move_stdout_to_stderr(self):
+        to_remove = []
+        to_add = []
+        for consumer_level, consumer in self.consumers:
+            if consumer == sys.stdout:
+                to_remove.append((consumer_level, consumer))
+                to_add.append((consumer_level, sys.stderr))
+        for item in to_remove:
+            self.consumers.remove(item)
+        self.consumers.extend(to_add)
+
+
+def call_subprocess(cmd, show_stdout=True,
+                    filter_stdout=None, cwd=None,
+                    raise_on_returncode=True,
+                    command_level=Logger.DEBUG, command_desc=None,
+                    extra_environ=None):
+    if command_desc is None:
+        cmd_parts = []
+        for part in cmd:
+            if ' ' in part or '\n' in part or '"' in part or "'" in part:
+                part = '"%s"' % part.replace('"', '\\"')
+            cmd_parts.append(part)
+        command_desc = ' '.join(cmd_parts)
+    if show_stdout:
+        stdout = None
+    else:
+        stdout = subprocess.PIPE
+    logger.log(command_level, "Running command %s" % command_desc)
+    env = os.environ.copy()
+    if extra_environ:
+        env.update(extra_environ)
+    try:
+        proc = subprocess.Popen(
+            cmd, stderr=subprocess.STDOUT, stdin=None, stdout=stdout,
+            cwd=cwd, env=env)
+    except Exception, e:
+        logger.fatal(
+            "Error %s while executing command %s" % (e, command_desc))
+        raise
+    all_output = []
+    if stdout is not None:
+        stdout = proc.stdout
+        while 1:
+            line = stdout.readline()
+            if not line:
+                break
+            line = line.rstrip()
+            all_output.append(line + '\n')
+            if filter_stdout:
+                level = filter_stdout(line)
+                if isinstance(level, tuple):
+                    level, line = level
+                logger.log(level, line)
+                if not logger.stdout_level_matches(level):
+                    logger.show_progress()
+            else:
+                logger.info(line)
+    else:
+        returned_stdout, returned_stderr = proc.communicate()
+        all_output = [returned_stdout or '']
+    proc.wait()
+    if proc.returncode:
+        if raise_on_returncode:
+            if all_output:
+                logger.notify('Complete output from command %s:' % command_desc)
+                logger.notify('\n'.join(all_output) + '\n----------------------------------------')
+            raise CommandError(
+                "Command %s failed with error code %s"
+                % (command_desc, proc.returncode))
+        else:
+            logger.warn(
+                "Command %s had error code %s"
+                % (command_desc, proc.returncode))
+    if stdout is not None:
+        return ''.join(all_output)
+
 
 ############################################################
 ## Utility functions

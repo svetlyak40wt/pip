@@ -34,7 +34,7 @@ source_suffix = '.txt'
 master_doc = 'index'
 
 # General substitutions.
-project = 'PoachEggs'
+project = 'pyinstall'
 copyright = '2008, The Open Planning Project'
 
 # The default replacements for |version| and |release|, also used in various
@@ -107,7 +107,7 @@ html_last_updated_fmt = '%b %d, %Y'
 #html_copy_source = True
 
 # Output file base name for HTML help builder.
-htmlhelp_basename = 'PoachEggsdocs'
+htmlhelp_basename = 'pyinstalldocs'
 
 
 # Options for LaTeX output

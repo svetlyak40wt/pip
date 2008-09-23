@@ -4,14 +4,14 @@ except ImportError:
     from distutils.core import setup
 import os
 
-version = '0.3'
+version = '0.1'
 
 doc_dir = os.path.join(os.path.dirname(__file__), 'docs')
 index_filename = os.path.join(doc_dir, 'index.txt')
 
-setup(name='PoachEggs',
+setup(name='pyinstall',
       version=version,
-      description="Install a batch of packages at once",
+      description="Installer for Python packages",
       long_description=open(index_filename).read(),
       classifiers=[
         'Development Status :: 4 - Beta',
@@ -20,16 +20,13 @@ setup(name='PoachEggs',
         'License :: OSI Approved :: MIT License',
         'Topic :: Software Development :: Build Tools',
       ],
-      keywords='virtualenv setuptools egg',
+      keywords='easy_install distutils setuptools egg virtualenv',
       author='The Open Planning Project',
       author_email='python-virtualenv@groups.google.com',
-      url='http://pypi.python.org/pypi/PoachEggs',
+      url='http://pypi.python.org/pypi/pyinstall',
       license='MIT',
-      py_modules=['poacheggs', 'pyinstall'],
-      entry_points="""
-      [console_scripts]
-      poacheggs = poacheggs:main
-      pyinstall = pyinstall:main
-      """,
+      py_modules=['pyinstall'],
+      ## FIXME: is this the best way?  (Works with distutils)
+      scripts=['pyinstall.py'],
       )
       
