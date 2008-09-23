@@ -27,6 +27,7 @@ from Queue import Empty as QueueEmpty
 import threading
 import httplib
 import time
+import logging
 
 class InstallationError(Exception):
     """General exception during installation"""
@@ -137,6 +138,13 @@ parser.add_option(
     "be used as the basis of the new file.")
 
 parser.add_option(
+    '-E', '--environment',
+    dest='venv',
+    metavar='DIR',
+    help='virtualenv environment to run pyinstall in (either give the '
+    'interpreter or the environment base directory)')
+
+parser.add_option(
     '-v', '--verbose',
     dest='verbose',
     action='count',
@@ -154,11 +162,24 @@ parser.add_option(
     metavar='FILENAME',
     help='Log file where a complete (maximum verbosity) record will be kept')
 
-def main(args=None):
+def main(initial_args=None):
     global logger
-    if args is None:
-        args = sys.argv[1:]
-    options, args = parser.parse_args(args)
+    if initial_args is None:
+        initial_args = sys.argv[1:]
+    options, args = parser.parse_args(initial_args)
+
+    if args and args[-1] == '___VENV_RESTART___':
+        ## FIXME: We don't do anything this this value yet:
+        venv_location = args[-2]
+        args = args[:-2]
+        options.venv = None
+    if options.venv:
+        if options.verbose > 0:
+            # The logger isn't setup yet
+            print 'Running in environment %s' % options.venv
+        restart_in_venv(options.venv, initial_args)
+        # restart_in_venv should actually never return, but for clarity...
+        return
 
     level = 1 # Notify
     level += options.verbose
@@ -254,6 +275,22 @@ def format_exc(exc_info=None):
     out = StringIO()
     traceback.print_exception(*exc_info, **dict(file=out))
     return out.getvalue()
+
+def restart_in_venv(venv, args):
+    """
+    Restart this script using the interpreter in the given virtual environment
+    """
+    venv = os.path.abspath(venv)
+    if sys.platform == 'win32':
+        python = os.path.join(venv, 'Scripts', 'python')
+    else:
+        python = os.path.join(venv, 'bin', 'python')
+    if not os.path.exists(python):
+        python = venv
+    if not os.path.exists(python):
+        raise BadCommand('Cannot find virtual environment interpreter at %s' % python)
+    base = os.path.dirname(os.path.dirname(python))
+    os.execv(python, [python, __file__] + args + [base, '___VENV_RESTART___'])
 
 class PackageFinder(object):
     """This finds packages.
@@ -473,8 +510,8 @@ class InstallRequirement(object):
 
     @classmethod
     def from_editable(cls, editable_req, comes_from=None):
-        name, checkout_url = parse_editable(editable_req)
-        return cls(name, comes_from, editable=True, checkout_url=checkout_url)
+        name, url = parse_editable(editable_req)
+        return cls(name, comes_from, editable=True, url=url)
 
     @classmethod
     def from_line(cls, name, comes_from=None):
@@ -507,7 +544,7 @@ class InstallRequirement(object):
         if self.satisfied_by is not None:
             s += ' in %s' % display_path(self.satisfied_by.location)
         if self.editable:
-            s += ' checkout from %s' % self.checkout_url
+            s += ' checkout from %s' % self.url
         if self.comes_from:
             if isinstance(self.comes_from, basestring):
                 comes_from = self.comes_from
@@ -695,19 +732,19 @@ execfile(__file__)
                          % (display_path(self.source_dir), version, self))
 
     def update_editable(self):
-        assert self.editable and self.checkout_url
+        assert self.editable and self.url
         assert self.source_dir
-        vc_type, url = self.checkout_url.split('+', 1)
+        vc_type, url = self.url.split('+', 1)
         vc_type = vc_type.lower()
         if vc_type == 'svn':
             self.checkout_svn()
         else:
             assert 0, (
                 'Unexpected version control type (in %s): %s' 
-                % (self.checkout_url, vc_type))
+                % (self.url, vc_type))
 
     def checkout_svn(self):
-        url = self.checkout_url.split('+', 1)[1]
+        url = self.url.split('+', 1)[1]
         url = url.split('#', 1)[0]
         if '@' in url:
             url, rev = url.split('@', 1)
@@ -1586,6 +1623,11 @@ class FrozenRequirement(object):
         if os.path.exists(os.path.join(location, '.svn')):
             editable = True
             req = get_src_requirement(dist, location, find_tags)
+            if req is None:
+                logger.warn('Could not determine svn location of %s' % location)
+                comments.append('## !! Could not determine svn location')
+                req = dist.as_requirement()
+                editable = False
         else:
             editable = False
             req = dist.as_requirement()
@@ -1607,8 +1649,16 @@ class FrozenRequirement(object):
                     else:
                         rev = '{%s}' % date_match.group(1)
                     editable = True
-                    req = '%s@%s#egg=%s' % (svn_location, rev, dist.egg_name())
+                    req = 'svn+%s@%s#egg=%s' % (svn_location, rev, cls.egg_name(dist))
         return cls(dist.project_name, req, editable, comments)
+
+    @staticmethod
+    def egg_name(dist):
+        name = dist.egg_name()
+        match = re.search(r'-py\d\.\d$', name)
+        if match:
+            name = name[:match.start()]
+        return name
 
     def __str__(self):
         req = self.req
@@ -1643,11 +1693,11 @@ def get_src_requirement(dist, location, find_tags):
     egg_project_name = dist.egg_name().split('-', 1)[0]
     if parts[-2] in ('tags', 'tag'):
         # It's a tag, perfect!
-        return '%s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
+        return 'svn+%s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
     elif parts[-2] in ('branches', 'branch'):
         # It's a branch :(
         rev = get_svn_revision(location)
-        return '%s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
+        return 'svn+%s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
     elif parts[-1] == 'trunk':
         # Trunk :-/
         rev = get_svn_revision(location)
@@ -1657,8 +1707,8 @@ def get_src_requirement(dist, location, find_tags):
             match = find_tag_match(rev, tag_revs)
             if match:
                 logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
-                return '%s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
-        return '%s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
+                return 'svn+%s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
+        return 'svn+%s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
     else:
         # Don't know what it is
         logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
@@ -1732,14 +1782,14 @@ def get_svn_url(location):
     f = open(os.path.join(location, '.svn', 'entries'))
     data = f.read()
     f.close()
-    if data.startswith('8'):
+    if data.startswith('8') or data.startswith('9'):
         data = map(str.splitlines,data.split('\n\x0c\n'))
         del data[0][0]  # get rid of the '8'
         return data[0][3]
     elif data.startswith('<?xml'):
         return _svn_url_re.search(data).group(1)    # get repository URL
     else:
-        logger.warn("unrecognized .svn/entries format in %s" % location)
+        logger.warn("Unrecognized .svn/entries format in %s" % location)
         # Or raise exception?
         return None
 
@@ -1818,7 +1868,7 @@ def parse_requirements(filename, finder, comes_from=None):
                 # Relative to a URL
                 req_url = urlparse.urljoin(filename, url)
             elif not _scheme_re.search(req_url):
-                req_url = os.path.join(os.path.basename(filename), url)
+                req_url = os.path.join(os.path.dirname(filename), req_url)
             for item in parse_requirements(req_url, finder, comes_from=filename):
                 yield item
         elif line.startswith('-Z') or line.startswith('--always-unzip'):
@@ -2070,7 +2120,7 @@ def call_subprocess(cmd, show_stdout=True,
             if all_output:
                 logger.notify('Complete output from command %s:' % command_desc)
                 logger.notify('\n'.join(all_output) + '\n----------------------------------------')
-            raise CommandError(
+            raise InstallationError(
                 "Command %s failed with error code %s"
                 % (command_desc, proc.returncode))
         else:
