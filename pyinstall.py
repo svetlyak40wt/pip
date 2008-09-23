@@ -927,7 +927,10 @@ class RequirementSet(object):
             elif req_to_install.editable:
                 logger.notify('Checking out %s' % req_to_install)
             else:
-                logger.notify('Downloading/unpacking %s' % req_to_install)
+                if req_to_install.url and req_to_install.url.lower().startswith('file:'):
+                    logger.notify('Unpacking %s' % display_path(url_to_filename(req_to_install.url)))
+                else:
+                    logger.notify('Downloading/unpacking %s' % req_to_install)
             logger.indent += 2
             is_bundle = False
             try:
@@ -1002,6 +1005,11 @@ class RequirementSet(object):
             self.svn_export(link, location)
             return
         dir = tempfile.mkdtemp()
+        if link.url.lower().startswith('file:'):
+            source = url_to_filename(link.url)
+            content_type = mimetypes.guess_type(source)
+            self.unpack_file(source, location, content_type, link)
+            return
         md5_hash = link.md5_hash
         try:
             resp = urllib2.urlopen(link.url.split('#', 1)[0])
