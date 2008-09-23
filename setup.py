@@ -26,7 +26,8 @@ setup(name='pyinstall',
       url='http://pypi.python.org/pypi/pyinstall',
       license='MIT',
       py_modules=['pyinstall'],
-      ## FIXME: is this the best way?  (Works with distutils)
+      ## FIXME: is this the best way?  (Works with distutils, but
+      ## don't we really require setuptools anyway?)
       scripts=['pyinstall.py'],
       )
       

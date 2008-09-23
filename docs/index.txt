@@ -101,3 +101,18 @@ Another way to distribute a set of libraries is a bundle format (specific to pyi
 
 This is *not* a binary format.  This only packages source.  If you have binary packages, then the person who installs the files will have to have a compiler, any necessary headers installed, etc.  Binary packages are hard, this is relatively easy.
 
+Using pyinstall With virtualenv
+-------------------------------
+
+pyinstall is most nutritious when used with `virtualenv <http://pypi.python.org/pypi/virtualenv>`_.  One of the reasons pyinstall doesn't install "multi-version" eggs is that virtualenv removes much of the need for it.
+
+pyinstall does not have to be installed to use it, you can run ``python pyinstall.py`` and it will work.  This is intended to avoid the bootstrapping problem of installation.  You can also run pyinstall inside any virtualenv environment, like::
+
+    $ virtualenv new-env
+    ... creates new-env/ ...
+    $ pyinstall -E new-env MyPackage
+
+This is exactly equivalent to::
+
+    $ ./new-env/bin/python pyinstall.py MyPackage
+
