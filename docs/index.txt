@@ -28,6 +28,11 @@ Also, pyinstall will eventually be merged directly with poacheggs, making it sim
 
 pyinstall is complementary with `virtualenv <http://pypi.python.org/pypi/virtualenv>`_, and it is encouraged that you use virtualenv to isolate your installation.
 
+Community
+---------
+
+The homepage for pyinstall is temporarily located `on PyPI <http://pypi.python.org/pypi/pyinstall>`_ -- a more proper homepage will follow.  Bugs can go on the `poacheggs Trac instance <http://trac.openplans.org/poacheggs/>`_ (probably that will change too).  Discussion should happen on the `virtualenv email group <http://groups.google.com/group/python-virtualenv?hl=en>`_.
+
 Differences From easy_install
 -----------------------------
 

@@ -16,7 +16,7 @@ source code into ``src/distname`` (making the name lower case) and
 runs ``python setup.py develop`` on the package.  To indicate
 editable, use ``-e``, like::
 
-    -e http://svn.myproject.org/svn/MyProject/trunk#egg=MyProject
+    -e svn+http://svn.myproject.org/svn/MyProject/trunk#egg=MyProject
 
 The ``#egg=MyProject`` part is important, because while you can
 install simply given the svn location, the project name is useful in
@@ -34,9 +34,6 @@ multiple ``-f`` arguments to easy_install, but you can in a
 requirements file (they all get concatenated into a single ``-f`` for
 easy_install).
 
-You can also use ``-Z`` or ``--always-unzip``, which makes poacheggs
-install all packages as unzipped eggs.
-
 Version Control
 ---------------
 
@@ -47,11 +44,8 @@ for Bazaar, git, etc. will probably be easy).
 
 You can also give specific revisions to an SVN URL, like::
 
-    http://svn.myproject.org/svn/MyProject/trunk@2019
+    -e svn+http://svn.myproject.org/svn/MyProject/trunk@2019
 
 which will check out revision 2019.  ``@{20080101}`` would also check
-out the revision from 2008-01-01.
-
-All URLs given with ``-e`` are currently assumed to be svn URLs.  Some
-extension of the syntax will be required in the future to support
-other kinds of version control systems.
+out the revision from 2008-01-01.  You can only check out specific
+revisions using ``-e svn+...``.
