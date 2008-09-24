@@ -42,7 +42,7 @@ if getattr(sys, 'real_prefix', None):
 else:
     ## FIXME: this isn't a very good default
     base_prefix = os.path.join(os.getcwd(), 'build')
-    base_prefix = os.path.join(os.getcwd(), 'src')
+    base_src_prefix = os.path.join(os.getcwd(), 'src')
 
 pypi_url = "http://pypi.python.org/simple"
 
