@@ -16,7 +16,8 @@ import shutil
 try:
     from hashlib import md5
 except ImportError:
-    import md5
+    import md5 as md5_module
+    md5 = md5_module.new
 import urlparse
 from email.FeedParser import FeedParser
 import traceback
@@ -45,6 +46,8 @@ else:
     base_src_prefix = os.path.join(os.getcwd(), 'src')
 
 pypi_url = "http://pypi.python.org/simple"
+
+default_timeout = 15
 
 parser = optparse.OptionParser(
     usage='%prog [OPTIONS] PACKAGE_NAMES')
@@ -105,8 +108,8 @@ parser.add_option(
     metavar='SECONDS',
     dest='timeout',
     type='int',
-    default=10,
-    help='Set the socket timeout (default 10 seconds)')
+    default=default_timeout,
+    help='Set the socket timeout (default %s seconds)' % default_timeout)
 
 parser.add_option(
     '-U', '--upgrade',
@@ -162,6 +165,50 @@ parser.add_option(
     metavar='FILENAME',
     help='Log file where a complete (maximum verbosity) record will be kept')
 
+parser.add_option(
+    '--proxy',
+    dest='proxy',
+    type='str',
+    default='',
+    help="Specify a proxy in the form user:passwd@proxy.server:port. "
+    "Note that the user:password@ is optional and required only if you "
+    "are behind an authenticated proxy.  If you provide "
+    "user@proxy.server:port then you will be prompted for a password."
+    )
+
+def get_proxy(proxystr=''):
+    """Get the proxy given the option passed on the command line.  If an
+    empty string is passed it looks at the HTTP_PROXY environment
+    variable."""
+    if not proxystr:
+        proxystr = os.environ.get('HTTP_PROXY', '')
+    if proxystr:
+        if '@' in proxystr:
+            user_password, server_port = proxystr.split('@', 1)
+            if ':' in user_password:
+                user, password = user_password.split(':', 1)
+            else:
+                user = user_password
+                import getpass
+                prompt = 'Password for %s@%s: ' % (user, server_port)
+                password = urllib.quote(getpass.getpass(prompt))
+            return '%s:%s@%s' % (user, password, server_port)
+        else:
+            return proxystr
+    else:
+        return None
+
+def setup_proxy_handler(proxystr=''):
+    """Set the proxy handler given the option passed on the command
+    line.  If an empty string is passed it looks at the HTTP_PROXY
+    environment variable.  """
+    proxy = get_proxy(proxystr)
+    if proxy:
+        proxy_support = urllib2.ProxyHandler({"http": proxy, "ftp": proxy})
+        opener = urllib2.build_opener(proxy_support, urllib2.CacheFTPHandler)
+        urllib2.install_opener(opener)
+
+
 def main(initial_args=None):
     global logger
     if initial_args is None:
@@ -194,6 +241,8 @@ def main(initial_args=None):
     else:
         log_fp = None
     socket.setdefaulttimeout(options.timeout or None)
+
+    setup_proxy_handler(options.proxy)
 
     if options.bundle:
         if not options.build_dir:
@@ -1084,7 +1133,7 @@ class RequirementSet(object):
         temp_location = os.path.join(dir, filename)
         fp = open(temp_location, 'wb')
         if md5_hash:
-            download_hash = md5.new()
+            download_hash = md5()
         try:
             total_length = int(resp.info()['content-length'])
         except (ValueError, KeyError):

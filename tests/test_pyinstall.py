@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-import doctest
 import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import doctest
 
 pyversion = sys.version[:3]
 lib_py = 'lib/python%s/' % pyversion
@@ -55,7 +56,7 @@ def main():
     options, args = parser.parse_args()
     reset_env()
     if not args:
-        args = ['test_basic.txt', 'test_requirements.txt', 'test_freeze.txt']
+        args = ['test_basic.txt', 'test_requirements.txt', 'test_freeze.txt', 'test_proxy.txt']
     optionflags = doctest.ELLIPSIS
     if options.first:
         optionflags |= doctest.REPORT_ONLY_FIRST_FAILURE
