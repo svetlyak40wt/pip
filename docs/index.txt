@@ -120,7 +120,7 @@ tell you what all the exact versions are.
 
 To create a new requirements file from a known working environment, use::
 
-    pyinstall --freeze=stable-req.txt
+    $ pyinstall.py --freeze=stable-req.txt
 
 This will write a listing of *all* installed libraries to ``stable-req.txt``
 with exact versions for every library.  You may want to edit the file down after
@@ -130,7 +130,7 @@ stable starting point for constructing your requirements file.
 You can also give it an existing requirements file, and it will use that as a
 sort of template for the new file.  So if you do::
 
-    pyinstall --freeze=stable-req.txt -r devel-req.txt
+    $ pyinstall.py --freeze=stable-req.txt -r devel-req.txt
 
 it will keep the packages listed in ``devel-req.txt`` in order and preserve
 comments.
@@ -145,12 +145,12 @@ source for your package, and you can have pyinstall install then all together.
 Once you have the bundle file further network access won't be necessary.  To
 build a bundle file, do::
 
-    pyinstall --bundle=MyApp.pybundle MyApp
+    $ pyinstall.py --bundle=MyApp.pybundle MyApp
 
 (Using a `requirements file`_ would be wise.)  Then someone else can get the
 file ``MyApp.pybundle`` and run::
 
-    pyinstall MyApp.pybundle
+    $ pyinstall.py MyApp.pybundle
 
 This is *not* a binary format.  This only packages source.  If you have binary
 packages, then the person who installs the files will have to have a compiler,
@@ -172,7 +172,7 @@ environment, like::
 
     $ virtualenv new-env
     ... creates new-env/ ...
-    $ pyinstall -E new-env MyPackage
+    $ pyinstall.py -E new-env MyPackage
 
 This is exactly equivalent to::
 
