@@ -1,8 +1,8 @@
 News for pyinstall
 ==================
 
-svn trunk
----------
+0.1.1
+-----
 
 * Fixed a NameError exception when running pyinstall outside of a
   virtualenv environment.
