@@ -107,7 +107,7 @@ parser.add_option(
     '--timeout',
     metavar='SECONDS',
     dest='timeout',
-    type='int',
+    type='float',
     default=default_timeout,
     help='Set the socket timeout (default %s seconds)' % default_timeout)
 
@@ -1414,22 +1414,30 @@ class HTMLPage(object):
             real_url = resp.geturl()
             headers = resp.info()
             inst = cls(resp.read(), real_url, headers)
-        except urllib2.HTTPError, e:
-            if e.code == 404:
+        except (urllib2.HTTPError, urllib2.URLError, socket.timeout), e:
+            desc = str(e)
+            if isinstance(e, socket.timeout):
+                log_meth = logger.warn
+                level =1
+                desc = 'timed out'
+            elif isinstance(e, urllib2.URLError):
+                log_meth = logger.warn
+                if isinstance(e.reason, socket.timeout):
+                    desc = 'timed out'
+                    level = 1
+                else:
+                    level = 2
+            elif isinstance(e, urllib2.HTTPError) and e.code == 404:
                 ## FIXME: notify?
                 log_meth = logger.info
                 level = 2
             else:
                 log_meth = logger.warn
                 level = 1
-            log_meth('Could not fetch URL %s: %s (for requirement %s)' % (link, e, req))
+            log_meth('Could not fetch URL %s: %s' % (link, desc))
+            log_meth('Will skip URL %s when looking for download links for %s' % (link.url, req))
             if cache is not None:
                 cache.add_page_failure(url, level)
-            return None
-        except urllib2.URLError, e:
-            logger.warn('URL %s is invalid: %s' % (link, e))
-            if cache is not None:
-                cache.add_page_failure(url, 2)
             return None
         if cache is not None:
             cache.add_page([url, real_url], inst)
