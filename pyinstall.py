@@ -1393,22 +1393,22 @@ class HTMLPage(object):
             inst = cache.get_page(url)
             if inst is not None:
                 return inst
-        if skip_archives:
-            if cache is not None:
-                if cache.is_archive(url):
-                    return None
-            filename = link.filename
-            for bad_ext in ['.tar', '.tar.gz', '.tar.bz2', '.tgz', '.zip']:
-                if filename.endswith(bad_ext):
-                    content_type = cls._get_content_type(url)
-                    if content_type.lower().startswith('text/html'):
-                        break
-                    else:
-                        logger.debug('Skipping page %s because of Content-Type: %s' % (link, content_type))
-                        if cache is not None:
-                            cache.set_is_archive(url)
-                        return None
         try:
+            if skip_archives:
+                if cache is not None:
+                    if cache.is_archive(url):
+                        return None
+                filename = link.filename
+                for bad_ext in ['.tar', '.tar.gz', '.tar.bz2', '.tgz', '.zip']:
+                    if filename.endswith(bad_ext):
+                        content_type = cls._get_content_type(url)
+                        if content_type.lower().startswith('text/html'):
+                            break
+                        else:
+                            logger.debug('Skipping page %s because of Content-Type: %s' % (link, content_type))
+                            if cache is not None:
+                                cache.set_is_archive(url)
+                            return None
             logger.debug('Getting page %s' % url)
             resp = urllib2.urlopen(url)
             real_url = resp.geturl()
