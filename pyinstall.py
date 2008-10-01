@@ -562,7 +562,7 @@ class PackageFinder(object):
 class InstallRequirement(object):
 
     def __init__(self, req, comes_from, source_dir=None, editable=False,
-                 url=None):
+                 url=None, update=True):
         if isinstance(req, basestring):
             req = pkg_resources.Requirement.parse(req)
         self.req = req
@@ -578,6 +578,8 @@ class InstallRequirement(object):
         self.satisfied_by = None
         self._temp_build_dir = None
         self._is_bundle = None
+        # True if the editable should be updated:
+        self.update = update
 
     @classmethod
     def from_editable(cls, editable_req, comes_from=None):
@@ -806,6 +808,8 @@ execfile(__file__)
         assert self.editable and self.url
         assert self.source_dir
         assert '+' in self.url, "bad url: %r" % self.url
+        if not self.update:
+            return
         vc_type, url = self.url.split('+', 1)
         vc_type = vc_type.lower()
         if vc_type == 'svn':
@@ -970,7 +974,8 @@ execfile(__file__)
                 ## FIXME: svnism:
                 url = 'svn+' + self._get_svn_url(os.path.join(src_dir, package))
                 yield InstallRequirement(
-                    package, self, editable=True, url=url)
+                    package, self, editable=True, url=url,
+                    update=False)
         if os.path.exists(build_dir):
             for package in os.listdir(build_dir):
                 yield InstallRequirement(

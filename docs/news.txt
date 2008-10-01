@@ -7,6 +7,8 @@ svn trunk
 * Always use ``svn checkout`` (not ``export``) so that
   ``tag_svn_revision`` settings give the revision of the package.
 
+* Don't update checkouts that came from ``.pybundle`` files.
+
 0.1.2
 -----
 
