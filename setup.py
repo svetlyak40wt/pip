@@ -23,7 +23,7 @@ setup(name='pyinstall',
       keywords='easy_install distutils setuptools egg virtualenv',
       author='The Open Planning Project',
       author_email='python-virtualenv@groups.google.com',
-      url='http://pypi.python.org/pypi/pyinstall',
+      url='http://pyinstall.openplans.org',
       license='MIT',
       py_modules=['pyinstall'],
       ## FIXME: is this the best way?  (Works with distutils, but
