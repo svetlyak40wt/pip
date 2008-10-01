@@ -1,8 +1,8 @@
 News for pyinstall
 ==================
 
-svn trunk
----------
+0.1.2
+-----
 
 * Improve error text when there are errors fetching HTML pages when
   seeking packages.
