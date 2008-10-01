@@ -1,8 +1,8 @@
 News for pyinstall
 ==================
 
-svn trunk
----------
+0.1.3
+-----
 
 * Always use ``svn checkout`` (not ``export``) so that
   ``tag_svn_revision`` settings give the revision of the package.
