@@ -390,6 +390,7 @@ class PackageFinder(object):
                 for url in self.index_urls] + self.find_links
         else:
             locations = list(self.find_links)
+        locations.extend(self.dependency_links)
         for version in req.absolute_versions:
             locations = [
                 posixpath.join(url, url_name, version)] + locations
@@ -1128,7 +1129,7 @@ class RequirementSet(object):
 
     def unpack_url(self, link, location):
         if link.scheme == 'svn' or link.scheme == 'svn+ssh':
-            self.svn_export(link, location)
+            self.svn_checkout(link, location)
             return
         dir = tempfile.mkdtemp()
         if link.url.lower().startswith('file:'):
@@ -1211,7 +1212,7 @@ class RequirementSet(object):
         elif (content_type.startswith('text/html')
               and is_svn_page(file_contents(filename))):
             # We don't really care about this
-            self.svn_export(link.url, location)
+            self.svn_checkout(link.url, location)
         else:
             ## FIXME: handle?
             ## FIXME: magic signatures?
@@ -1287,18 +1288,18 @@ class RequirementSet(object):
         finally:
             tar.close()
 
-    def svn_export(self, url, location):
-        """Export the svn repository at the url to the destination location"""
+    def svn_checkout(self, url, location):
+        """Check out the svn repository at the url to the destination location"""
         if '#' in url:
             url = url.split('#', 1)[0]
-        logger.notify('Exporting svn repository %s to %s' % (url, location))
+        logger.notify('Checking out svn repository %s to %s' % (url, location))
         logger.indent += 2
         try:
             ## FIXME: not sure that --force is good, but it is needed
             ## when installing directly (not via a requirement),
             ## because the destination directory already exists.
-            call_subprocess(['svn', 'export', '--force', url, location],
-                                      filter_stdout=self._filter_svn, show_stdout=False)
+            call_subprocess(['svn', 'checkout', '--force', url, location],
+                            filter_stdout=self._filter_svn, show_stdout=False)
         finally:
             logger.indent -= 2
 
@@ -1440,7 +1441,7 @@ class HTMLPage(object):
             real_url = resp.geturl()
             headers = resp.info()
             inst = cls(resp.read(), real_url, headers)
-        except (urllib2.HTTPError, urllib2.URLError, socket.timeout), e:
+        except (urllib2.HTTPError, urllib2.URLError, socket.timeout, socket.error), e:
             desc = str(e)
             if isinstance(e, socket.timeout):
                 log_meth = logger.warn

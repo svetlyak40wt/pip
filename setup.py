@@ -12,7 +12,7 @@ index_filename = os.path.join(doc_dir, 'index.txt')
 setup(name='pyinstall',
       version=version,
       description="Installer for Python packages",
-      long_description=open(index_filename).read(),
+      long_description=open(index_filename).read().split('split here', 1)[1],
       classifiers=[
         'Development Status :: 4 - Beta',
         #'Development Status :: 5 - Production/Stable',
