@@ -92,7 +92,7 @@ parser.add_option(
     help='extra URLs of package indexes to use in addition to --index-url')
 
 parser.add_option(
-    '-b', '--build-dir', '--build-directory',
+    '-b', '--build', '--build-dir', '--build-directory',
     dest='build_dir',
     metavar='DIR',
     default=None,
@@ -220,14 +220,6 @@ def main(initial_args=None):
         venv_location = args[-2]
         args = args[:-2]
         options.venv = None
-    if options.venv:
-        if options.verbose > 0:
-            # The logger isn't setup yet
-            print 'Running in environment %s' % options.venv
-        restart_in_venv(options.venv, initial_args)
-        # restart_in_venv should actually never return, but for clarity...
-        return
-
     level = 1 # Notify
     level += options.verbose
     level -= options.quiet
@@ -235,11 +227,20 @@ def main(initial_args=None):
     complete_log = []
     logger = Logger([(level, sys.stdout), 
                      (Logger.DEBUG, complete_log.append)])
+    if options.venv:
+        if options.verbose > 0:
+            # The logger isn't setup yet
+            print 'Running in environment %s' % options.venv
+        restart_in_venv(options.venv, initial_args)
+        # restart_in_venv should actually never return, but for clarity...
+        return
+    ## FIXME: not sure if this sure come before or after venv restart
     if options.log:
         log_fp = open_logfile_append(options.log)
         logger.consumers.append((logger.DEBUG, log_fp))
     else:
         log_fp = None
+
     socket.setdefaulttimeout(options.timeout or None)
 
     setup_proxy_handler(options.proxy)
@@ -330,6 +331,18 @@ def restart_in_venv(venv, args):
     Restart this script using the interpreter in the given virtual environment
     """
     venv = os.path.abspath(venv)
+    if not os.path.exists(venv):
+        try:
+            import virtualenv
+        except ImportError:
+            print 'The virtual environment does not exist: %s' % venv
+            print 'and virtualenv is not installed, so a new environment cannot be created'
+            sys.exit(3)
+        print 'Creating new virtualenv environment in %s' % venv
+        virtualenv.logger = logger
+        logger.indent += 2
+        ## FIXME: always have no_site_packages?
+        virtualenv.create_environment(venv, site_packages=False)
     if sys.platform == 'win32':
         python = os.path.join(venv, 'Scripts', 'python')
     else:
@@ -360,6 +373,7 @@ class PackageFinder(object):
         ## FIXME: this shouldn't be global list this, it should only
         ## apply to requirements of the package that specifies the
         ## dependency_links value
+        ## FIXME: also, we should track comes_from (i.e., use Link)
         self.dependency_links.extend(links)
 
     def find_requirement(self, req, upgrade):
@@ -370,9 +384,12 @@ class PackageFinder(object):
         page = self._get_page(main_index_url, req)
         if page is None:
             url_name = self._find_url_name(Link(self.index_urls[0]), url_name, req)
-        locations = [
-            posixpath.join(url, url_name)
-            for url in self.index_urls] + self.find_links + self.dependency_links
+        if url_name is not None:
+            locations = [
+                posixpath.join(url, url_name)
+                for url in self.index_urls] + self.find_links
+        else:
+            locations = list(self.find_links)
         for version in req.absolute_versions:
             locations = [
                 posixpath.join(url, url_name, version)] + locations
@@ -388,6 +405,10 @@ class PackageFinder(object):
                 found_versions.extend(self._package_versions(page.links, req.name.lower()))
             finally:
                 logger.indent -= 2
+        dependency_versions = list(self._package_versions([Link(url) for url in self.dependency_links], req.name.lower()))
+        if dependency_versions:
+            logger.info('dependency_links found: %s' % ', '.join([link.url for parsed, link, version in dependency_versions]))
+            found_versions.extend(dependency_versions)
         if not found_versions:
             logger.fatal('Could not find any downloads that satisfy the requirement %s' % req)
             raise DistributionNotFound('No distributions at all found for %s' % req)
@@ -441,7 +462,7 @@ class PackageFinder(object):
             if norm_name == normalize_name(base):
                 logger.notify('Real name of requirement %s is %s' % (url_name, base))
                 return base
-        raise DistributionNotFound('Cannot find requirement %s' % req)
+        return None
 
     def _get_pages(self, locations, req):
         """Yields (page, page_url) from the given locations, skipping
@@ -783,6 +804,7 @@ execfile(__file__)
     def update_editable(self):
         assert self.editable and self.url
         assert self.source_dir
+        assert '+' in self.url, "bad url: %r" % self.url
         vc_type, url = self.url.split('+', 1)
         vc_type = vc_type.lower()
         if vc_type == 'svn':
@@ -898,7 +920,7 @@ execfile(__file__)
             call_subprocess(
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py),
-                 'develop'], cwd=self.source_dir, filter_stdout=self._filter_install,
+                 'develop', '--no-deps'], cwd=self.source_dir, filter_stdout=self._filter_install,
                 show_stdout=False)
         finally:
             logger.indent -= 2
@@ -945,7 +967,7 @@ execfile(__file__)
         if os.path.exists(src_dir):
             for package in os.listdir(src_dir):
                 ## FIXME: svnism:
-                url = self._get_svn_url(os.path.join(src_dir, package))
+                url = 'svn+' + self._get_svn_url(os.path.join(src_dir, package))
                 yield InstallRequirement(
                     package, self, editable=True, url=url)
         if os.path.exists(build_dir):
@@ -1319,6 +1341,10 @@ class RequirementSet(object):
             for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
                 dir = os.path.normcase(os.path.abspath(dir))
                 for dirpath, dirnames, filenames in os.walk(dir):
+                    for dirname in dirnames:
+                        dirname = os.path.join(dirpath, dirname)
+                        name = self._clean_zip_name(dirname, dir)
+                        zip.writestr(basename + '/' + name + '/', '')
                     for filename in filenames:
                         filename = os.path.join(dirpath, filename)
                         name = self._clean_zip_name(filename, dir)
@@ -1422,7 +1448,7 @@ class HTMLPage(object):
                 desc = 'timed out'
             elif isinstance(e, urllib2.URLError):
                 log_meth = logger.warn
-                if isinstance(e.reason, socket.timeout):
+                if hasattr(e, 'reason') and isinstance(e.reason, socket.timeout):
                     desc = 'timed out'
                     level = 1
                 else:
@@ -2285,7 +2311,7 @@ def backup_dir(dir, ext='.bak'):
     (adding .bak, .bak2, etc)"""
     n = 1
     extension = ext
-    while os.path.exists(dir + ext):
+    while os.path.exists(dir + extension):
         n += 1
         extension = ext + str(n)
     return dir + extension

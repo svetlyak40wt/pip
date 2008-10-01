@@ -7,6 +7,14 @@ svn trunk
 * Improve error text when there are errors fetching HTML pages when
   seeking packages.
 
+* Improve bundles: include empty directories, make them work with
+  editable packages.
+
+* If you use ``-E env`` and the environment ``env/`` doesn't exist, a
+  new virtual environment will be created.
+
+* Fix ``dependency_links`` for finding packages.
+
 0.1.1
 -----
 
