@@ -2235,8 +2235,7 @@ def file_contents(filename):
     finally:
         fp.close()
 
-_no_default = ()
-def split_leading_dir(path, default=_no_default):
+def split_leading_dir(path):
     path = str(path)
     path = path.lstrip('/').lstrip('\\')
     if '/' in path and (('\\' in path and path.find('/') < path.find('\\'))
@@ -2244,18 +2243,16 @@ def split_leading_dir(path, default=_no_default):
         return path.split('/', 1)
     elif '\\' in path:
         return path.split('\\', 1)
-    elif default is not _no_default:
-        return default, path
     else:
-        assert 0, 'No directories in path: %r' % path
+        return path, ''
 
 def has_leading_dir(paths):
     """Returns true if all the paths have the same leading path name
     (i.e., everything is in one subdirectory in an archive)"""
     common_prefix = None
     for path in paths:
-        prefix, rest = split_leading_dir(path, default=None)
-        if prefix is None:
+        prefix, rest = split_leading_dir(path)
+        if not prefix:
             return False
         elif common_prefix is None:
             common_prefix = prefix
