@@ -1033,8 +1033,8 @@ class RequirementSet(object):
             self.unnamed_requirements.append(install_req)
         else:
             if name in self.requirements:
-                assert 0, (
-                    "Double required: %s (aready in %s, name=%r)"
+                raise InstallationError(
+                    'Double requirement given: %s (aready in %s, name=%r)'
                     % (install_req, self.requirements[name], name))
             self.requirements[name] = install_req
 
