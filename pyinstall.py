@@ -845,7 +845,7 @@ execfile(__file__)
         dest = self.source_dir
         checkout = True
         if os.path.exists(os.path.join(self.source_dir, '.svn')):
-            existing_url = self._get_svn_url(self.source_dir)
+            existing_url = _get_svn_info(self.source_dir)[0]
             checkout = False
             if existing_url == url:
                 logger.info('Checkout in %s exists, and has correct URL (%s)'
@@ -878,18 +878,6 @@ execfile(__file__)
             logger.notify('Checking out %s%s to %s' % (url, rev_display, display_path(self.source_dir)))
             call_subprocess(
                 ['svn', 'checkout', '-q'] + rev_options + [url, self.source_dir])
-
-    _svn_url_re = re.compile(r'URL: (.+)')
-
-    def _get_svn_url(self, dir):
-        output = call_subprocess(['svn', 'info', dir], show_stdout=False,
-                                 extra_environ={'LANG': 'C'})
-        match = self._svn_url_re.search(output)
-        if not match:
-            logger.warn('Cannot determine URL of svn checkout %s' % display_path(dir))
-            logger.info('Output that cannot be parsed: \n%s' % output)
-            return 'unknown'
-        return match.group(1).strip()
 
     def install(self, install_options):
         if self.editable:
@@ -982,7 +970,7 @@ execfile(__file__)
         if os.path.exists(src_dir):
             for package in os.listdir(src_dir):
                 ## FIXME: svnism:
-                url = 'svn+' + self._get_svn_url(os.path.join(src_dir, package))
+                url = 'svn+' + _get_svn_info(os.path.join(src_dir, package))[0]
                 yield InstallRequirement(
                     package, self, editable=True, url=url,
                     update=False)
@@ -1345,9 +1333,20 @@ class RequirementSet(object):
         ## packages, maybe some other metadata files.  It would make
         ## it easier to detect as well.
         zip = zipfile.ZipFile(bundle_filename, 'w', zipfile.ZIP_DEFLATED)
+        svn_dirs = []
         for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
             dir = os.path.normcase(os.path.abspath(dir))
             for dirpath, dirnames, filenames in os.walk(dir):
+                svn_url = svn_rev = None
+                if '.svn' in dirnames:
+                    for svn_dir in svn_dirs:
+                        if dirpath.startswith(svn_dir):
+                            # svn-checkout.txt already in parent directory
+                            break
+                    else:
+                        svn_url, svn_rev = _get_svn_info(os.path.join(dir, dirpath))
+                        svn_dirs.append(dirpath)
+                    dirnames.remove('.svn')
                 for dirname in dirnames:
                     dirname = os.path.join(dirpath, dirname)
                     name = self._clean_zip_name(dirname, dir)
@@ -1356,6 +1355,10 @@ class RequirementSet(object):
                     filename = os.path.join(dirpath, filename)
                     name = self._clean_zip_name(filename, dir)
                     zip.write(filename, basename + '/' + name)
+                if svn_url:
+                    name = os.path.join(dirpath, 'svn-checkout.txt')
+                    name = self._clean_zip_name(name, dir)
+                    zip.writestr(basename + '/' + name, self._svn_checkout_text(svn_url, svn_rev))
         zip.writestr('pyinstall-manifest.txt', self.bundle_requirements())
         zip.close()
         # Unlike installation, this will always delete the build directories
@@ -1364,6 +1367,10 @@ class RequirementSet(object):
         for dir in self.build_dir, self.src_dir:
             if os.path.exists(dir):
                 shutil.rmtree(dir)
+
+    def _svn_checkout_text(self, svn_url, svn_rev):
+        return ('# This was an svn checkout; to make it a checkout again run:\n'
+                'svn checkout --force -r %s %s\n' % (svn_rev, svn_url))
 
     BUNDLE_HEADER = '''\
 # This is a pyinstall bundle file, that contains many source packages
@@ -2220,6 +2227,28 @@ def call_subprocess(cmd, show_stdout=True,
     if stdout is not None:
         return ''.join(all_output)
 
+
+_svn_url_re = re.compile(r'URL: (.+)')
+_svn_revision_re = re.compile(r'Revision: (.+)')
+
+def _get_svn_info(dir):
+    """Returns (url, revision), where both are strings"""
+    assert not dir.rstrip('/').endswith('.svn'), 'Bad directory: %s' % dir
+    output = call_subprocess(['svn', 'info', dir], show_stdout=False,
+                             extra_environ={'LANG': 'C'})
+    print 'output for dir:', dir, output
+    match = _svn_url_re.search(output)
+    if not match:
+        logger.warn('Cannot determine URL of svn checkout %s' % display_path(dir))
+        logger.info('Output that cannot be parsed: \n%s' % output)
+        return 'unknown', 'unknown'
+    url = match.group(1).strip()
+    match = _svn_revision_re.search(output)
+    if not match:
+        logger.warn('Cannot determine revision of svn checkout %s' % display_path(dir))
+        logger.info('Output that cannot be parsed: \n%s' % output)
+        return url, 'unknown'
+    return url, match.group(1)
 
 ############################################################
 ## Utility functions

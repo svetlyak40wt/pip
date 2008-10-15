@@ -7,6 +7,16 @@ svn trunk
 * Added an option ``--install-option`` to pass options to pass
   arguments to ``setup.py install``
 
+* ``.svn/`` directories are no longer included in bundles, as these
+  directories are specific to a version of svn -- if you build a
+  bundle on a system with svn 1.5, you can't use the checkout on a
+  system with svn 1.4.  Instead a file ``svn-checkout.txt`` is
+  included that notes the original location and revision, and the
+  command you can use to turn it back into an svn checkout.  (Probably
+  unpacking the bundle should, maybe optionally, recreate this
+  information -- but that is not currently implemented, and it would
+  require network access.)
+
 0.1.3
 -----
 
