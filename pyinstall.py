@@ -579,8 +579,6 @@ class InstallRequirement(object):
         self.comes_from = comes_from
         self.source_dir = source_dir
         self.editable = editable
-        if editable:
-            assert url, "You must give url with editable=True"
         self.url = url
         self._egg_info_path = None
         # This holds the pkg_resources.Distribution object if this requirement
@@ -817,7 +815,10 @@ execfile(__file__)
                          % (display_path(self.source_dir), version, self))
 
     def update_editable(self):
-        assert self.editable and self.url
+        if not self.url:
+            logger.info("Cannot update repository at %s; repository location is unknown" % self.source_dir)
+            return
+        assert self.editable
         assert self.source_dir
         assert '+' in self.url, "bad url: %r" % self.url
         if not self.update:
@@ -980,19 +981,17 @@ execfile(__file__)
                     fp.close()
                     url, rev = _parse_svn_checkout_text(content)
                 if url:
-                    editable = True
                     url = 'svn+%s@%s' % (url, rev)
                 else:
-                    ## FIXME: log warning?
-                    editable = False
                     url = None
                 yield InstallRequirement(
-                    package, self, editable=editable, url=url,
-                    update=False)
+                    package, self, editable=True, url=url,
+                    update=False, source_dir=os.path.join(src_dir, package))
         if os.path.exists(build_dir):
             for package in os.listdir(build_dir):
                 yield InstallRequirement(
-                    package, self)
+                    package, self,
+                    source_dir=os.path.join(build_dir, package))
 
     def move_bundle_files(self, dest_build_dir, dest_src_dir):
         base = self._temp_build_dir
