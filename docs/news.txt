@@ -22,6 +22,12 @@ svn trunk
   This in particular caused problems on Macs, where ``MyPackage/`` and
   ``mypackage/`` are the same directory.
 
+* Added support for an environmental variable
+  ``$PYINSTALL_DOWNLOAD_CACHE`` which will cache package downloads, so
+  future installations won't require large downloads.  Network access
+  is still required, but just some downloads will be avoided when
+  using this.
+
 0.1.3
 -----
 

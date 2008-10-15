@@ -627,7 +627,8 @@ class InstallRequirement(object):
         if self.satisfied_by is not None:
             s += ' in %s' % display_path(self.satisfied_by.location)
         if self.editable:
-            s += ' checkout from %s' % self.url
+            if self.req:
+                s += ' checkout from %s' % self.url
         if self.comes_from:
             if isinstance(self.comes_from, basestring):
                 comes_from = self.comes_from
@@ -1160,59 +1161,81 @@ class RequirementSet(object):
             self.unpack_file(source, location, content_type, link)
             return
         md5_hash = link.md5_hash
-        try:
-            resp = urllib2.urlopen(link.url.split('#', 1)[0])
-        except urllib2.HTTPError, e:
-            logger.fatal("HTTP error %s while getting %s" % (e.code, link))
-            raise
-        except IOError, e:
-            # Typically an FTP error
-            logger.fatal("Error %s while getting %s" % (e, link))
-            raise
-        content_type = resp.info()['content-type']
-        filename = link.filename
-        ext = splitext(filename)
-        if not ext:
-            ext = mimetypes.guess_extension(content_type)
-            filename += ext
-        temp_location = os.path.join(dir, filename)
-        fp = open(temp_location, 'wb')
-        if md5_hash:
-            download_hash = md5()
-        try:
-            total_length = int(resp.info()['content-length'])
-        except (ValueError, KeyError):
-            total_length = 0
-        downloaded = 0
-        show_progress = total_length > 40*1000 or not total_length
-        show_url = link.show_url
-        try:
-            if show_progress:
-                ## FIXME: the URL can get really long in this message:
-                if total_length:
-                    logger.start_progress('Downloading %s (%s): ' % (show_url, format_size(total_length)))
-                else:
-                    logger.start_progress('Downloading %s (unknown size): ' % show_url)
-            else:
-                logger.notify('Downloading %s' % show_url)
-            logger.debug('Downloading from URL %s' % link)
-            while 1:
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                downloaded += len(chunk)
-                if show_progress:
-                    if not total_length:
-                        logger.show_progress('%s' % format_size(downloaded))
-                    else:
-                        logger.show_progress('%3i%%  %s' % (100*downloaded/total_length, format_size(downloaded)))
-                if md5_hash:
-                    download_hash.update(chunk)
-                fp.write(chunk)
+        target_url = link.url.split('#', 1)[0]
+        target_file = None
+        if os.environ.get('PYINSTALL_DOWNLOAD_CACHE'):
+            target_file = os.path.join(os.environ['PYINSTALL_DOWNLOAD_CACHE'],
+                                       urllib.quote(target_url, ''))
+        if (target_file and os.path.exists(target_file)
+            and os.path.exists(target_file+'.content-type')):
+            fp = open(target_file+'.content-type')
+            content_type = fp.read().strip()
             fp.close()
-        finally:
-            if show_progress:
-                logger.end_progress('%s downloaded' % format_size(downloaded))
+            if md5_hash:
+                download_hash = md5()
+                fp = open(target_file, 'rb')
+                while 1:
+                    chunk = fp.read(4096)
+                    if not chunk:
+                        break
+                    download_hash.update(chunk)
+                fp.close()
+            temp_location = target_file
+            logger.notify('Using download cache from %s' % target_file)
+        else:
+            try:
+                resp = urllib2.urlopen(target_url)
+            except urllib2.HTTPError, e:
+                logger.fatal("HTTP error %s while getting %s" % (e.code, link))
+                raise
+            except IOError, e:
+                # Typically an FTP error
+                logger.fatal("Error %s while getting %s" % (e, link))
+                raise
+            content_type = resp.info()['content-type']
+            filename = link.filename
+            ext = splitext(filename)
+            if not ext:
+                ext = mimetypes.guess_extension(content_type)
+                filename += ext
+            temp_location = os.path.join(dir, filename)
+            fp = open(temp_location, 'wb')
+            if md5_hash:
+                download_hash = md5()
+            try:
+                total_length = int(resp.info()['content-length'])
+            except (ValueError, KeyError):
+                total_length = 0
+            downloaded = 0
+            show_progress = total_length > 40*1000 or not total_length
+            show_url = link.show_url
+            try:
+                if show_progress:
+                    ## FIXME: the URL can get really long in this message:
+                    if total_length:
+                        logger.start_progress('Downloading %s (%s): ' % (show_url, format_size(total_length)))
+                    else:
+                        logger.start_progress('Downloading %s (unknown size): ' % show_url)
+                else:
+                    logger.notify('Downloading %s' % show_url)
+                logger.debug('Downloading from URL %s' % link)
+                while 1:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if show_progress:
+                        if not total_length:
+                            logger.show_progress('%s' % format_size(downloaded))
+                        else:
+                            logger.show_progress('%3i%%  %s' % (100*downloaded/total_length, format_size(downloaded)))
+                    if md5_hash:
+                        download_hash.update(chunk)
+                    fp.write(chunk)
+                fp.close()
+            finally:
+                if show_progress:
+                    logger.end_progress('%s downloaded' % format_size(downloaded))
         if md5_hash:
             download_hash = download_hash.hexdigest()
             if download_hash != md5_hash:
@@ -1220,6 +1243,12 @@ class RequirementSet(object):
                              % (link, download_hash, md5_hash))
                 raise InstallationError('Bad MD5 hash for package %s' % link)
         self.unpack_file(temp_location, location, content_type, link)
+        if target_file and target_file != temp_location:
+            logger.notify('Storing download in cache at %s' % display_path(target_file))
+            shutil.copyfile(temp_location, target_file)
+            fp = open(target_file+'.content-type', 'w')
+            fp.write(content_type)
+            fp.close()
         os.unlink(temp_location)
 
     def unpack_file(self, filename, location, content_type, link):
@@ -1389,7 +1418,7 @@ class RequirementSet(object):
 
     def _svn_checkout_text(self, svn_url, svn_rev):
         return ('# This was an svn checkout; to make it a checkout again run:\n'
-                'svn checkout --force -r %s %s\n' % (svn_rev, svn_url))
+                'svn checkout --force -r %s %s .\n' % (svn_rev, svn_url))
 
     BUNDLE_HEADER = '''\
 # This is a pyinstall bundle file, that contains many source packages
@@ -2255,7 +2284,6 @@ def _get_svn_info(dir):
     assert not dir.rstrip('/').endswith('.svn'), 'Bad directory: %s' % dir
     output = call_subprocess(['svn', 'info', dir], show_stdout=False,
                              extra_environ={'LANG': 'C'})
-    print 'output for dir:', dir, output
     match = _svn_url_re.search(output)
     if not match:
         logger.warn('Cannot determine URL of svn checkout %s' % display_path(dir))
