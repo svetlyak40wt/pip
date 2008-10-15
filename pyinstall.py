@@ -1344,29 +1344,20 @@ class RequirementSet(object):
         ## FIXME: this file should really include a manifest of the
         ## packages, maybe some other metadata files.  It would make
         ## it easier to detect as well.
-        if 0:
-            tar = tarfile.open(bundle_filename, 'w:bz2')
-            ## FIXME: should there be cleanup?  E.g., kill the .egg-info directories?
-            ## Or kill .pyc files?
-            for dir, name in (self.build_dir, 'build'), (self.src_dir, 'src'):
-                if os.path.exists(dir):
-                    tar.add(dir, name)
-            tar.close()
-        else:
-            zip = zipfile.ZipFile(bundle_filename, 'w', zipfile.ZIP_DEFLATED)
-            for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
-                dir = os.path.normcase(os.path.abspath(dir))
-                for dirpath, dirnames, filenames in os.walk(dir):
-                    for dirname in dirnames:
-                        dirname = os.path.join(dirpath, dirname)
-                        name = self._clean_zip_name(dirname, dir)
-                        zip.writestr(basename + '/' + name + '/', '')
-                    for filename in filenames:
-                        filename = os.path.join(dirpath, filename)
-                        name = self._clean_zip_name(filename, dir)
-                        zip.write(filename, basename + '/' + name)
-            zip.writestr('pyinstall-manifest.txt', self.bundle_requirements())
-            zip.close()
+        zip = zipfile.ZipFile(bundle_filename, 'w', zipfile.ZIP_DEFLATED)
+        for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
+            dir = os.path.normcase(os.path.abspath(dir))
+            for dirpath, dirnames, filenames in os.walk(dir):
+                for dirname in dirnames:
+                    dirname = os.path.join(dirpath, dirname)
+                    name = self._clean_zip_name(dirname, dir)
+                    zip.writestr(basename + '/' + name + '/', '')
+                for filename in filenames:
+                    filename = os.path.join(dirpath, filename)
+                    name = self._clean_zip_name(filename, dir)
+                    zip.write(filename, basename + '/' + name)
+        zip.writestr('pyinstall-manifest.txt', self.bundle_requirements())
+        zip.close()
         # Unlike installation, this will always delete the build directories
         logger.info('Removing temporary build dir %s and source dir %s'
                     % (self.build_dir, self.src_dir))
