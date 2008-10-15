@@ -634,7 +634,8 @@ class InstallRequirement(object):
                 comes_from = self.comes_from
             else:
                 comes_from = self.comes_from.from_path()
-            s += ' (from %s)' % comes_from
+            if comes_from:
+                s += ' (from %s)' % comes_from
         return s
 
     def from_path(self):
@@ -971,9 +972,22 @@ execfile(__file__)
         if os.path.exists(src_dir):
             for package in os.listdir(src_dir):
                 ## FIXME: svnism:
-                url = 'svn+' + _get_svn_info(os.path.join(src_dir, package))[0]
+                svn_checkout = os.path.join(src_dir, package, 'svn-checkout.txt')
+                url = rev = None
+                if os.path.exists(svn_checkout):
+                    fp = open(svn_checkout)
+                    content = fp.read()
+                    fp.close()
+                    url, rev = _parse_svn_checkout_text(content)
+                if url:
+                    editable = True
+                    url = 'svn+%s@%s' % (url, rev)
+                else:
+                    ## FIXME: log warning?
+                    editable = False
+                    url = None
                 yield InstallRequirement(
-                    package, self, editable=True, url=url,
+                    package, self, editable=editable, url=url,
                     update=False)
         if os.path.exists(build_dir):
             for package in os.listdir(build_dir):
@@ -1406,7 +1420,7 @@ class RequirementSet(object):
                 if svn_url:
                     name = os.path.join(dirpath, 'svn-checkout.txt')
                     name = self._clean_zip_name(name, dir)
-                    zip.writestr(basename + '/' + name, self._svn_checkout_text(svn_url, svn_rev))
+                    zip.writestr(basename + '/' + name, _svn_checkout_text(svn_url, svn_rev))
         zip.writestr('pyinstall-manifest.txt', self.bundle_requirements())
         zip.close()
         # Unlike installation, this will always delete the build directories
@@ -1415,10 +1429,7 @@ class RequirementSet(object):
         for dir in self.build_dir, self.src_dir:
             if os.path.exists(dir):
                 shutil.rmtree(dir)
-
-    def _svn_checkout_text(self, svn_url, svn_rev):
-        return ('# This was an svn checkout; to make it a checkout again run:\n'
-                'svn checkout --force -r %s %s .\n' % (svn_rev, svn_url))
+                              
 
     BUNDLE_HEADER = '''\
 # This is a pyinstall bundle file, that contains many source packages
@@ -2296,6 +2307,22 @@ def _get_svn_info(dir):
         logger.info('Output that cannot be parsed: \n%s' % output)
         return url, 'unknown'
     return url, match.group(1)
+
+def _svn_checkout_text(svn_url, svn_rev):
+    return ('# This was an svn checkout; to make it a checkout again run:\n'
+            'svn checkout --force -r %s %s .\n' % (svn_rev, svn_url))
+
+def _parse_svn_checkout_text(text):
+    for line in text.splitlines():
+        if not line.strip() or line.strip().startswith('#'):
+            continue
+        match = re.search(r'^-r\s*([^ ])?', line)
+        if not match:
+            return None, None
+        rev = match.group(1)
+        rest = line[match.end():].strip().split(None, 1)[0]
+        return rest, rev
+    return None, None
 
 ############################################################
 ## Utility functions
