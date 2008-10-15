@@ -1019,6 +1019,8 @@ class RequirementSet(object):
         self.upgrade = upgrade
         self.ignore_installed = ignore_installed
         self.requirements = {}
+        # Mapping of alias: real_name
+        self.requirement_aliases = {}
         self.unnamed_requirements = []
 
     def __str__(self):
@@ -1032,11 +1034,28 @@ class RequirementSet(object):
         if not name:
             self.unnamed_requirements.append(install_req)
         else:
-            if name in self.requirements:
+            if self.has_requirement(name):
                 raise InstallationError(
                     'Double requirement given: %s (aready in %s, name=%r)'
-                    % (install_req, self.requirements[name], name))
+                    % (install_req, self.get_requirement(name), name))
             self.requirements[name] = install_req
+            ## FIXME: what about other normalizations?  E.g., _ vs. -?
+            if name.lower() != name:
+                self.requirement_aliases[name.lower()] = name
+
+    def has_requirement(self, project_name):
+        for name in project_name, project_name.lower():
+            if name in self.requirements or name in self.requirement_aliases:
+                return True
+        return False
+
+    def get_requirement(self, project_name):
+        for name in project_name, project_name.lower():
+            if name in self.requirements:
+                return self.requirements[name]
+            if name in self.requirement_aliases:
+                return self.requirements[self.requirement_aliases[name]]
+        raise KeyError("No project with the name %r" % project_name)
 
     def install_files(self, finder):
         unnamed = list(self.unnamed_requirements)
@@ -1117,7 +1136,7 @@ class RequirementSet(object):
                             ## FIXME: proper warning
                             logger.error('Invalid requirement: %r (%s) in requirement %s' % (req, e, req_to_install))
                             continue
-                        if name in self.requirements:
+                        if self.has_requirement(name):
                             ## FIXME: check for conflict
                             continue
                         subreq = InstallRequirement(req, req_to_install)

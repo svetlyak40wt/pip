@@ -17,6 +17,11 @@ svn trunk
   information -- but that is not currently implemented, and it would
   require network access.)
 
+* Avoid ambiguities over project name case, where for instance
+  MyPackage and mypackage would be considered different packages.
+  This in particular caused problems on Macs, where ``MyPackage/`` and
+  ``mypackage/`` are the same directory.
+
 0.1.3
 -----
 
