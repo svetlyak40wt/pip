@@ -176,6 +176,15 @@ parser.add_option(
     "user@proxy.server:port then you will be prompted for a password."
     )
 
+parser.add_option(
+    '--install-option',
+    dest='install_options',
+    action='append',
+    help="Extra arguments to be supplied to the setup.py install "
+    "command (use like --install-option=\"--install-scripts=/usr/local/bin\").  "
+    "Use multiple --install-option options to pass multiple options to setup.py install"
+    )
+
 def get_proxy(proxystr=''):
     """Get the proxy given the option passed on the command line.  If an
     empty string is passed it looks at the HTTP_PROXY environment
@@ -260,6 +269,7 @@ def main(initial_args=None):
         options.src_dir = base_src_prefix
     options.build_dir = os.path.abspath(options.build_dir)
     options.src_dir = os.path.abspath(options.src_dir)
+    install_options = options.install_options or []
     try:
         if options.freeze:
             if options.requirements:
@@ -294,7 +304,7 @@ def main(initial_args=None):
         exit = 0
         requirement_set.install_files(finder)
         if not options.no_install and not options.bundle:
-            requirement_set.install()
+            requirement_set.install(install_options)
             logger.notify('Successfully installed %s' % requirement_set)
         elif options.bundle:
             requirement_set.create_bundle(options.bundle)
@@ -881,7 +891,7 @@ execfile(__file__)
             return 'unknown'
         return match.group(1).strip()
 
-    def install(self):
+    def install(self, install_options):
         if self.editable:
             self.install_editable()
             return
@@ -900,7 +910,7 @@ execfile(__file__)
                 [sys.executable, '-c',
                  "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
                  'install', '--single-version-externally-managed', '--record', record_filename,
-                 '--install-headers', header_dir],
+                 '--install-headers', header_dir] + install_options,
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
         finally:
             logger.indent -= 2
@@ -1311,7 +1321,7 @@ class RequirementSet(object):
     def _filter_svn(self, line):
         return (Logger.INFO, line)
 
-    def install(self):
+    def install(self, install_options):
         """Install everything in this set (after having downloaded and unpacked the packages)"""
         requirements = sorted(self.requirements.values(), key=lambda p: p.name.lower())
         logger.notify('Installing collected packages: %s' % (', '.join([req.name for req in requirements])))
@@ -1321,7 +1331,7 @@ class RequirementSet(object):
                 if requirement.satisfied_by is not None:
                     # Already installed
                     continue
-                requirement.install()
+                requirement.install(install_options)
                 requirement.remove_temporary_source()
         finally:
             logger.indent -= 2

@@ -1,6 +1,12 @@
 News for pyinstall
 ==================
 
+svn trunk
+---------
+
+* Added an option ``--install-option`` to pass options to pass
+  arguments to ``setup.py install``
+
 0.1.3
 -----
 
