@@ -1324,6 +1324,8 @@ execfile(__file__)
         vc_type = vc_type.lower()
         if vc_type == 'svn':
             self.checkout_svn()
+        elif vc_type == 'git':
+            self.clone_git()
         else:
             assert 0, (
                 'Unexpected version control type (in %s): %s' 
@@ -1356,7 +1358,7 @@ execfile(__file__)
             else:
                 logger.warn('svn checkout in %s exists with URL %s' % (display_path(self.source_dir), existing_url))
                 logger.warn('The plan is to install the svn repository %s' % url)
-                response = ask('What to do?  (s)witch, (i)gnore, (w)ipe, (b)ackup', ('s', 'i', 'w', 'b'))
+                response = ask('What to do?  (s)witch, (i)gnore, (w)ipe, (b)ackup ', ('s', 'i', 'w', 'b'))
                 if response == 's':
                     logger.notify('Switching checkout %s to %s%s'
                                   % (display_path(self.source_dir), url, rev_display))
@@ -1379,6 +1381,61 @@ execfile(__file__)
             call_subprocess(
                 ['svn', 'checkout', '-q'] + rev_options + [url, self.source_dir])
 
+    def clone_git(self):
+        url = self.url.split('+', 1)[1]
+        url = url.split('#', 1)[0]
+        if '@' in url:
+            url, rev = url.split('@', 1)
+        else:
+            rev = None
+        if rev:
+            rev_options = [rev]
+            rev_display = ' (to revision %s)' % rev
+        else:
+            rev_options = ['master']
+            rev_display = ''
+        dest = self.source_dir
+        clone = True
+        if os.path.exists(os.path.join(self.source_dir, '.git')):
+            existing_url = get_git_url(self.source_dir)
+            clone = False
+            if existing_url == url:
+                logger.info('Clone in %s exists, and has correct URL (%s)'
+                            % (display_path(self.source_dir), url))
+                logger.notify('Updating clone %s%s' % (display_path(self.source_dir), rev_display))
+                call_subprocess(['git', 'fetch', '-q'], cwd=self.source_dir)
+                call_subprocess(['git', 'checkout', '-q', '-f'] + rev_options,
+                                cwd=self.source_dir)
+            else:
+                logger.warn('Git clone in %s exists with URL %s' % (display_path(self.source_dir), existing_url))
+                logger.warn('The plan is to install the git repository %s' % url)
+                response = ask('What to do?  (s)witch, (i)gnore, (w)ipe, (b)ackup ', ('s', 'i', 'w', 'b'))
+                if response == 's':
+                    logger.notify('Switching clone %s to %s%s'
+                                  % (display_path(self.source_dir), url, rev_display))
+                    os.chdir(self.source_dir)
+                    call_subprocess(['git', 'config', 'remote.origin.url', url],
+                                    cwd=self.source_dir)
+                    call_subprocess(['git', 'checkout', '-q'] + rev_options,
+                                    cwd=self.source_dir)
+                elif response == 'i':
+                    # do nothing
+                    pass
+                elif response == 'w':
+                    logger.warn('Deleting %s' % display_path(self.source_dir))
+                    shutil.rmtree(self.source_dir)
+                    clone = True
+                elif response == 'b':
+                    dest_dir = backup_dir(self.source_dir)
+                    logger.warn('Backing up %s to %s' % (display_path(self.source_dir), dest_dir))
+                    shutil.move(self.source_dir, dest_dir)
+                    clone = True
+        if clone:
+            logger.notify('Cloning %s%s to %s' % (url, rev_display, display_path(self.source_dir)))
+            call_subprocess(['git', 'clone', '-q', url, self.source_dir])
+            call_subprocess(['git', 'checkout', '-q'] + rev_options,
+                            cwd=self.source_dir)
+
     def install(self, install_options):
         if self.editable:
             self.install_editable()
@@ -1398,7 +1455,7 @@ execfile(__file__)
         try:
             call_subprocess(
                 [sys.executable, '-c',
-                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py), 
+                 "import setuptools; __file__=%r; execfile(%r)" % (self.setup_py, self.setup_py),
                  'install', '--single-version-externally-managed', '--record', record_filename,
                  '--install-headers', header_dir] + install_options,
                 cwd=self.source_dir, filter_stdout=self._filter_install, show_stdout=False)
@@ -1464,7 +1521,7 @@ execfile(__file__)
         self._is_bundle = (os.path.exists(os.path.join(base, 'pip-manifest.txt'))
                            or os.path.exists(os.path.join(base, 'pyinstall-manifest.txt')))
         return self._is_bundle
-    
+
     def bundle_requirements(self):
         base = self._temp_build_dir
         assert base
@@ -1474,14 +1531,23 @@ execfile(__file__)
             for package in os.listdir(src_dir):
                 ## FIXME: svnism:
                 svn_checkout = os.path.join(src_dir, package, 'svn-checkout.txt')
+                git_clone = os.path.join(src_dir, package, 'git-clone.txt')
                 url = rev = None
                 if os.path.exists(svn_checkout):
+                    vcs = 'svn'
                     fp = open(svn_checkout)
                     content = fp.read()
                     fp.close()
                     url, rev = _parse_svn_checkout_text(content)
+                elif os.path.exists(git_clone):
+                    vcs = 'git'
+                    fp = open(git_clone)
+                    content = fp.read()
+                    fp.close()
+                    sys.exit(0)
+                    url, rev = _parse_git_clone_text(content)
                 if url:
-                    url = 'svn+%s@%s' % (url, rev)
+                    url = '%s+%s@%s' % (vcs, url, rev)
                 else:
                     url = None
                 yield InstallRequirement(
@@ -1666,8 +1732,11 @@ class RequirementSet(object):
                 logger.indent -= 2
 
     def unpack_url(self, link, location):
-        if link.scheme == 'svn' or link.scheme == 'svn+ssh':
+        if link.scheme in ('svn', 'svn+ssh'):
             self.svn_checkout(link, location)
+            return
+        if link.scheme in ('git', 'git+ssh', 'git+http'):
+            self.git_clone(link, location)
             return
         dir = tempfile.mkdtemp()
         if link.url.lower().startswith('file:'):
@@ -1878,6 +1947,20 @@ class RequirementSet(object):
         finally:
             logger.indent -= 2
 
+    def git_clone(self, url, location):
+        """Clone the git repository at the url to the destination location"""
+        if '#' in url:
+            url = url.split('#', 1)[0]
+        logger.notify('Cloning git repository %s to %s' % (url, location))
+        logger.indent += 2
+        try:
+            if os.path.exists(location):
+                os.rmdir(location)
+            call_subprocess(['git', 'clone', url, location],
+                            filter_stdout=self._filter_svn, show_stdout=False)
+        finally:
+            logger.indent -= 2
+
     def _filter_svn(self, line):
         return (Logger.INFO, line)
 
@@ -1905,11 +1988,11 @@ class RequirementSet(object):
         ## packages, maybe some other metadata files.  It would make
         ## it easier to detect as well.
         zip = zipfile.ZipFile(bundle_filename, 'w', zipfile.ZIP_DEFLATED)
-        svn_dirs = []
+        svn_dirs = git_dirs = []
         for dir, basename in (self.build_dir, 'build'), (self.src_dir, 'src'):
             dir = os.path.normcase(os.path.abspath(dir))
             for dirpath, dirnames, filenames in os.walk(dir):
-                svn_url = svn_rev = None
+                svn_url = svn_rev = git_url = git_rev = None
                 if '.svn' in dirnames:
                     for svn_dir in svn_dirs:
                         if dirpath.startswith(svn_dir):
@@ -1919,6 +2002,15 @@ class RequirementSet(object):
                         svn_url, svn_rev = _get_svn_info(os.path.join(dir, dirpath))
                         svn_dirs.append(dirpath)
                     dirnames.remove('.svn')
+                if '.git' in dirnames:
+                    for git_dir in git_dirs:
+                        if dirpath.startswith(git_dir):
+                            # git-clone.txt already in parent directory
+                            break
+                    else:
+                        git_url, git_rev = _get_git_info(os.path.join(dir, dirpath))
+                        git_dirs.append(dirpath)
+                    dirnames.remove('.git')
                 if 'pip-egg-info' in dirnames:
                     dirnames.remove('pip-egg-info')
                 for dirname in dirnames:
@@ -1935,6 +2027,10 @@ class RequirementSet(object):
                     name = os.path.join(dirpath, 'svn-checkout.txt')
                     name = self._clean_zip_name(name, dir)
                     zip.writestr(basename + '/' + name, _svn_checkout_text(svn_url, svn_rev))
+                if git_url:
+                    name = os.path.join(dirpath, 'git-clone.txt')
+                    name = self._clean_zip_name(name, dir)
+                    zip.writestr(basename + '/' + name, _git_clone_text(git_url, git_rev))
         zip.writestr('pip-manifest.txt', self.bundle_requirements())
         zip.close()
         # Unlike installation, this will always delete the build directories
@@ -1943,7 +2039,6 @@ class RequirementSet(object):
         for dir in self.build_dir, self.src_dir:
             if os.path.exists(dir):
                 shutil.rmtree(dir)
-                              
 
     BUNDLE_HEADER = '''\
 # This is a pip bundle file, that contains many source packages
@@ -2168,7 +2263,7 @@ class Link(object):
     def __init__(self, url, comes_from=None):
         self.url = url
         self.comes_from = comes_from
-    
+
     def __str__(self):
         if self.comes_from:
             return '%s (from %s)' % (self.url, self.comes_from)
@@ -2241,12 +2336,13 @@ class FrozenRequirement(object):
     def from_dist(cls, dist, dependency_links, find_tags=False):
         location = os.path.normcase(os.path.abspath(dist.location))
         comments = []
-        if os.path.exists(os.path.join(location, '.svn')):
+        if os.path.exists(os.path.join(location, '.svn')) or \
+                os.path.exists(os.path.join(location, '.git')):
             editable = True
             req = get_src_requirement(dist, location, find_tags)
             if req is None:
-                logger.warn('Could not determine svn location of %s' % location)
-                comments.append('## !! Could not determine svn location')
+                logger.warn('Could not determine repository location of %s' % location)
+                comments.append('## !! Could not determine repository location')
                 req = dist.as_requirement()
                 editable = False
         else:
@@ -2303,41 +2399,111 @@ def get_svn_location(dist, dependency_links):
     return None
 
 def get_src_requirement(dist, location, find_tags):
-    if not os.path.exists(os.path.join(location, '.svn')):
-        logger.warn('cannot determine version of editable source in %s (is not svn checkout)' % location)
+    if not (os.path.exists(os.path.join(location, '.svn')) or
+            os.path.exists(os.path.join(location, '.git'))):
+        logger.warn('cannot determine version of editable source in %s (is not svn checkout or git clone)' % location)
         return dist.as_requirement()
-    repo = get_svn_url(location)
-    if repo is None:
-        return None
-    parts = repo.split('/')
-    ## FIXME: why not project name?
-    egg_project_name = dist.egg_name().split('-', 1)[0]
-    if parts[-2] in ('tags', 'tag'):
-        # It's a tag, perfect!
-        return 'svn+%s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
-    elif parts[-2] in ('branches', 'branch'):
-        # It's a branch :(
-        rev = get_svn_revision(location)
-        return 'svn+%s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
-    elif parts[-1] == 'trunk':
-        # Trunk :-/
-        rev = get_svn_revision(location)
-        if find_tags:
-            tag_url = '/'.join(parts[:-1]) + '/tags'
-            tag_revs = get_tag_revs(tag_url)
-            match = find_tag_match(rev, tag_revs)
-            if match:
-                logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
-                return 'svn+%s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
-        return 'svn+%s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
-    else:
-        # Don't know what it is
-        logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
-        rev = get_svn_revision(location)
-        return '%s@%s#egg=%s-dev' % (repo, rev, egg_project_name)
+    if os.path.exists(os.path.join(location, '.svn')):
+        repo = get_svn_url(location)
+        if repo is None:
+            return None
+        parts = repo.split('/')
+        ## FIXME: why not project name?
+        egg_project_name = dist.egg_name().split('-', 1)[0]
+        if parts[-2] in ('tags', 'tag'):
+            # It's a tag, perfect!
+            return 'svn+%s#egg=%s-%s' % (repo, egg_project_name, parts[-1])
+        elif parts[-2] in ('branches', 'branch'):
+            # It's a branch :(
+            rev = get_svn_revision(location)
+            return 'svn+%s@%s#egg=%s%s-r%s' % (repo, rev, dist.egg_name(), parts[-1], rev)
+        elif parts[-1] == 'trunk':
+            # Trunk :-/
+            rev = get_svn_revision(location)
+            if find_tags:
+                tag_url = '/'.join(parts[:-1]) + '/tags'
+                tag_revs = get_svn_tag_revs(tag_url)
+                match = find_svn_tag_match(rev, tag_revs)
+                if match:
+                    logger.notify('trunk checkout %s seems to be equivalent to tag %s' % match)
+                    return 'svn+%s/%s#egg=%s-%s' % (tag_url, match, egg_project_name, match)
+            return 'svn+%s@%s#egg=%s-dev' % (repo, rev, dist.egg_name())
+        else:
+            # Don't know what it is
+            logger.warn('svn URL does not fit normal structure (tags/branches/trunk): %s' % repo)
+            rev = get_svn_revision(location)
+            return '%s@%s#egg=%s-dev' % (repo, rev, egg_project_name)
+    elif os.path.exists(os.path.join(location, '.git')):
+        repo = get_git_url(location)
+        egg_project_name = dist.egg_name().split('-', 1)[0]
+        if not repo:
+            return None
+        current_rev = get_git_revision(location)
+        tag_revs = get_git_tag_revs(location)
+        branch_revs = get_git_branch_revs(location)
+        master_rev = get_git_master_revision(location)
+
+        if current_rev in tag_revs:
+            # It's a tag, perfect!
+            tag = tag_revs.get(current_rev, current_rev)
+            return 'git+%s@%s#egg=%s-%s' % (repo, tag, egg_project_name, tag)
+        elif current_rev in branch_revs:
+            # It's the head of a branch, nice too.
+            branch = branch_revs.get(current_rev, current_rev)
+            return 'git+%s@%s#egg=%s-%s' % (repo, current_rev, dist.egg_name(), current_rev)
+        elif current_rev == master_rev:
+            if find_tags:
+                if current_rev in tag_revs:
+                    tag = tag_revs.get(current_rev, current_rev)
+                    logger.notify('master %s seems to be equivalent to tag %s' % (current_rev, tag))
+                    return 'git+%s@%s#egg=%s-%s' % (repo, tag, egg_project_name, tag)
+            return 'git+%s@%s#egg=%s-dev' % (repo, master_rev, dist.egg_name())
+        else:
+            # Don't know what it is
+            logger.warn('git URL does not fit normal structure: %s' % repo)
+            rev = get_git_revision(location)
+            return '%s@%s#egg=%s-dev' % (repo, rev, egg_project_name)
 
 _svn_xml_url_re = re.compile('url="([^"]+)"')
 _svn_rev_re = re.compile('committed-rev="(\d+)"')
+
+def get_git_url(location):
+    url = call_subprocess(['git', 'config', 'remote.origin.url'],
+                          show_stdout=False, cwd=location)
+    return url.strip()
+
+def get_git_revision(location):
+    current_rev = call_subprocess(['git', 'rev-parse', 'HEAD'],
+                                  show_stdout=False, cwd=location)
+    return current_rev.strip()
+
+def get_git_master_revision(location):
+    master_rev = call_subprocess(['git', 'rev-parse', 'master'],
+                                 show_stdout=False, cwd=location)
+    return master_rev.strip()
+
+def get_git_tag_revs(location):
+    tags = call_subprocess(['git', 'tag'], show_stdout=False, cwd=location)
+    tag_revs = []
+    for line in tags.splitlines():
+        tag = line.strip()
+        rev = call_subprocess(['git', 'rev-parse', tag],
+                              show_stdout=False, cwd=location)
+        tag_revs.append((rev.strip(), tag))
+    tag_revs = dict(tag_revs)
+    return tag_revs
+
+def get_git_branch_revs(location):
+    branches = call_subprocess(['git', 'branch', '-r'],
+                               show_stdout=False, cwd=location)
+    branch_revs = []
+    for line in branches.splitlines():
+        branch = "".join([b for b in line.split() if b != '*'])
+        rev = call_subprocess(['git', 'rev-parse', branch],
+                              show_stdout=False, cwd=location)
+        branch_revs.append((rev.strip(), branch))
+    branch_revs = dict(branch_revs)
+    return branch_revs
 
 def get_svn_revision(location):
     """
@@ -2417,7 +2583,7 @@ def get_svn_url(location):
         # Or raise exception?
         return None
 
-def get_tag_revs(svn_tag_url):
+def get_svn_tag_revs(svn_tag_url):
     stdout = call_subprocess(
         ['svn', 'ls', '-v', svn_tag_url], show_stdout=False)
     results = []
@@ -2428,7 +2594,7 @@ def get_tag_revs(svn_tag_url):
         results.append((tag, rev))
     return results
 
-def find_tag_match(rev, tag_revs):
+def find_svn_tag_match(rev, tag_revs):
     best_match_rev = None
     best_tag = None
     for tag, tag_rev in tag_revs:
@@ -2801,6 +2967,33 @@ def _parse_svn_checkout_text(text):
         return rest, rev
     return None, None
 
+def _get_git_info(dir):
+    """Returns (url, revision), where both are strings"""
+    assert not dir.rstrip('/').endswith('.git'), 'Bad directory: %s' % dir
+    url = get_git_url(dir)
+    current_rev = call_subprocess(['git', 'rev-parse', 'HEAD'],
+                                  show_stdout=False, cwd=dir)
+    return url, current_rev.strip()
+
+def _git_clone_text(url, rev):
+    return ('# This was a git clone; to make it a clone again run:\ngit init\n'
+            'git remote add origin %s -f\ngit checkout %s\n' % (url, rev))
+
+def _parse_git_clone_text(text):
+    url = rev = None
+    for line in text.splitlines():
+        if not line.strip() or line.strip().startswith('#'):
+            continue
+        url_match = re.search(r'git\s*remote\s*add\s*origin(.*)\s*-f', line)
+        if url_match:
+            url = url_match.group(1).strip()
+        rev_match = re.search(r'^git\s*checkout\s*-q\s*(.*)\s*', line)
+        if rev_match:
+            rev = rev_match.group(1).strip()
+        if url and rev:
+            return url, rev
+    return None, None
+
 ############################################################
 ## Utility functions
 
@@ -2870,18 +3063,20 @@ def parse_editable(editable_req):
     url = editable_req
     if url.lower().startswith('svn:'):
         url = 'svn+' + url
+    if url.lower().startswith('git:'):
+        url = 'git+' + url
     if '+' not in url:
         if default_vcs:
             url = default_vcs + '+' + url
         else:
             raise InstallationError(
-                '--editable=%s should be formatted with svn+URL' % editable_req)
+                '--editable=%s should be formatted with svn+URL or git+URL' % editable_req)
     vc_type = url.split('+', 1)[0].lower()
-    if vc_type != 'svn':
+    if vc_type not in ('svn', 'git'):
         raise InstallationError(
-            'For --editable=%s only svn (svn+URL) is currently supported' % editable_req)
+            'For --editable=%s only svn (svn+URL) and git (git+URL) is currently supported' % editable_req)
     match = re.search(r'(?:#|#.*?&)egg=([^&]*)', editable_req)
-    if (not match or not match.group(1)) and vc_type == 'svn':
+    if (not match or not match.group(1)) and vc_type in ('svn', 'git'):
         parts = [p for p in editable_req.split('#', 1)[0].split('/') if p]
         if parts[-2] in ('tags', 'branches', 'tag', 'branch'):
             req = parts[-3]
