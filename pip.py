@@ -49,6 +49,12 @@ pypi_url = "http://pypi.python.org/simple"
 
 default_timeout = 15
 
+# Choose a git command based on platform.
+if sys.platform == 'win32':
+	GIT_CMD = 'git.cmd'
+else:
+	GIT_CMD = 'git'
+
 ## FIXME: this shouldn't be a module setting
 default_vcs = None
 if os.environ.get('PIP_DEFAULT_VCS'):
@@ -1403,8 +1409,8 @@ execfile(__file__)
                 logger.info('Clone in %s exists, and has correct URL (%s)'
                             % (display_path(self.source_dir), url))
                 logger.notify('Updating clone %s%s' % (display_path(self.source_dir), rev_display))
-                call_subprocess(['git', 'fetch', '-q'], cwd=self.source_dir)
-                call_subprocess(['git', 'checkout', '-q', '-f'] + rev_options,
+                call_subprocess([GIT_CMD, 'fetch', '-q'], cwd=self.source_dir)
+                call_subprocess([GIT_CMD, 'checkout', '-q', '-f'] + rev_options,
                                 cwd=self.source_dir)
             else:
                 logger.warn('Git clone in %s exists with URL %s' % (display_path(self.source_dir), existing_url))
@@ -1414,9 +1420,9 @@ execfile(__file__)
                     logger.notify('Switching clone %s to %s%s'
                                   % (display_path(self.source_dir), url, rev_display))
                     os.chdir(self.source_dir)
-                    call_subprocess(['git', 'config', 'remote.origin.url', url],
+                    call_subprocess([GIT_CMD, 'config', 'remote.origin.url', url],
                                     cwd=self.source_dir)
-                    call_subprocess(['git', 'checkout', '-q'] + rev_options,
+                    call_subprocess([GIT_CMD, 'checkout', '-q'] + rev_options,
                                     cwd=self.source_dir)
                 elif response == 'i':
                     # do nothing
@@ -1432,8 +1438,8 @@ execfile(__file__)
                     clone = True
         if clone:
             logger.notify('Cloning %s%s to %s' % (url, rev_display, display_path(self.source_dir)))
-            call_subprocess(['git', 'clone', '-q', url, self.source_dir])
-            call_subprocess(['git', 'checkout', '-q'] + rev_options,
+            call_subprocess([GIT_CMD, 'clone', '-q', url, self.source_dir])
+            call_subprocess([GIT_CMD, 'checkout', '-q'] + rev_options,
                             cwd=self.source_dir)
 
     def install(self, install_options):
@@ -1956,7 +1962,7 @@ class RequirementSet(object):
         try:
             if os.path.exists(location):
                 os.rmdir(location)
-            call_subprocess(['git', 'clone', url, location],
+            call_subprocess([GIT_CMD, 'clone', url, location],
                             filter_stdout=self._filter_svn, show_stdout=False)
         finally:
             logger.indent -= 2
@@ -2468,38 +2474,38 @@ _svn_xml_url_re = re.compile('url="([^"]+)"')
 _svn_rev_re = re.compile('committed-rev="(\d+)"')
 
 def get_git_url(location):
-    url = call_subprocess(['git', 'config', 'remote.origin.url'],
+    url = call_subprocess([GIT_CMD, 'config', 'remote.origin.url'],
                           show_stdout=False, cwd=location)
     return url.strip()
 
 def get_git_revision(location):
-    current_rev = call_subprocess(['git', 'rev-parse', 'HEAD'],
+    current_rev = call_subprocess([GIT_CMD, 'rev-parse', 'HEAD'],
                                   show_stdout=False, cwd=location)
     return current_rev.strip()
 
 def get_git_master_revision(location):
-    master_rev = call_subprocess(['git', 'rev-parse', 'master'],
+    master_rev = call_subprocess([GIT_CMD, 'rev-parse', 'master'],
                                  show_stdout=False, cwd=location)
     return master_rev.strip()
 
 def get_git_tag_revs(location):
-    tags = call_subprocess(['git', 'tag'], show_stdout=False, cwd=location)
+    tags = call_subprocess([GIT_CMD, 'tag'], show_stdout=False, cwd=location)
     tag_revs = []
     for line in tags.splitlines():
         tag = line.strip()
-        rev = call_subprocess(['git', 'rev-parse', tag],
+        rev = call_subprocess([GIT_CMD, 'rev-parse', tag],
                               show_stdout=False, cwd=location)
         tag_revs.append((rev.strip(), tag))
     tag_revs = dict(tag_revs)
     return tag_revs
 
 def get_git_branch_revs(location):
-    branches = call_subprocess(['git', 'branch', '-r'],
+    branches = call_subprocess([GIT_CMD, 'branch', '-r'],
                                show_stdout=False, cwd=location)
     branch_revs = []
     for line in branches.splitlines():
         branch = "".join([b for b in line.split() if b != '*'])
-        rev = call_subprocess(['git', 'rev-parse', branch],
+        rev = call_subprocess([GIT_CMD, 'rev-parse', branch],
                               show_stdout=False, cwd=location)
         branch_revs.append((rev.strip(), branch))
     branch_revs = dict(branch_revs)
@@ -2971,7 +2977,7 @@ def _get_git_info(dir):
     """Returns (url, revision), where both are strings"""
     assert not dir.rstrip('/').endswith('.git'), 'Bad directory: %s' % dir
     url = get_git_url(dir)
-    current_rev = call_subprocess(['git', 'rev-parse', 'HEAD'],
+    current_rev = call_subprocess([GIT_CMD, 'rev-parse', 'HEAD'],
                                   show_stdout=False, cwd=dir)
     return url, current_rev.strip()
 
