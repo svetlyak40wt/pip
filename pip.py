@@ -945,7 +945,7 @@ class PackageFinder(object):
         found_versions.sort(reverse=True)
         applicable_versions = []
         for (parsed_version, link, version) in found_versions:
-            if version not in req.req:
+            if pkg_resources.safe_version(version) not in req.req:
                 logger.info("Ignoring link %s, version %s doesn't match %s"
                             % (link, version, ','.join([''.join(s) for s in req.req.specs])))
                 continue
