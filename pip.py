@@ -910,7 +910,12 @@ class PackageFinder(object):
         # This will also cache the page, so it's okay that we get it again later:
         page = self._get_page(main_index_url, req)
         if page is None:
-            url_name = self._find_url_name(Link(self.index_urls[0]), url_name, req)
+            real_url_name = None
+            for index_url in self.index_urls:
+                real_url_name = self._find_url_name(Link(index_url), url_name, req)
+                if real_url_name:
+                    break
+            url_name = real_url_name
         if url_name is not None:
             locations = [
                 posixpath.join(url, url_name)
@@ -918,9 +923,11 @@ class PackageFinder(object):
         else:
             locations = list(self.find_links)
         locations.extend(self.dependency_links)
-        for version in req.absolute_versions:
-            locations = [
-                posixpath.join(url, url_name, version)] + locations
+        if url_name is not None:
+            for version in req.absolute_versions:
+                locations = [
+                    posixpath.join(url, url_name, version)
+                    for url in self.index_urls] + locations
         locations = [Link(url) for url in locations]
         logger.debug('URLs to search for versions for %s:' % req)
         for location in locations:
